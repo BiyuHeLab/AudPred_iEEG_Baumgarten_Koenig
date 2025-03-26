@@ -1,0 +1,45 @@
+2 (sd) x 5 (beta) x 3 (p*34) = 30 unique stim x 12 reps = 360 trials.
+
+
+
+-------
+
+
+
+3 (beta) x 3 (p*34) x 12 (reps) = 108
+
+x 3 tone dur = 324 trials
+
+k' = 7 for 300 ms tone -> 2.1 s
+
+for 300 ms tone, 2.1 s back -> k' = 7
+for 450 ms tone, 2.1 s back -> k' = 4.7
+for 600 ms tone, 2.1 s back -> k' = 3.5
+
+for 300 ms tone, k' = 7 -> 2.1 s back
+for 450 ms tone, k' = 7 -> 3.15 s back
+for 600 ms tone, k' = 7 -> 4.2 s back
+
+
+
+360 trials @ 10.2 s stim -> 61.2 min of stim alone
+108 trials @ 10.2 + 108 @ 15.3 + 108 @ 20.4 -> 82.6 min of stim alone (20 min longer)
+
+
+
+
+324 trials / 12 blocks = 27 trials / block
+
+counterbalancing:
+one level of beta (3) x p*34 (3) x stim dur (3) for each block = 27 trials
+
+i.e. present each unique stim once. randomize order within blocks.
+
+
+
+QUESTIONS
+- still use beta=1.01? I think so. for consistency.
+- should identical tone sequences be used across tone dur?
+--- case for "yes": simplifies interpretation of results. if we get a difference in k' as a function of tone duration, we want to make sure it's because of tone duration, not because of differences in the specific sequences used.
+--- case for "no": if subjects learn sequences via repetition, this might influence results. e.g. repeated presentation of sequence at 300 ms might artificially assist subject in "remembering" sequence at 600 ms. but... how likely would this be for the kind of lower level effect we think this is?
+--- verdict = yes.
