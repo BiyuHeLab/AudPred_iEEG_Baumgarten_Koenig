@@ -11,7 +11,7 @@ function SignElecIndices = NASTD_ECoG_Predict_PredEffectTable...
 
 SignElecIndices = [];
 
-for i_sub = validSubjs
+for i_sub = validSubjsi_inputData
     for i_inputData = 1:length(FuncInput_DataType)
         
         %% 1. Time-windowed data

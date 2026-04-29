@@ -1,4 +1,4 @@
-function NASTD_ECoG_Predict_PlotERF4SignClusterElec_AllSubTD...
+function NASTD_ECoG_Predict_PlotERF4SignClusterElec_longp34_lk...
     (subs, FuncInput_EffectType, FuncInput_DataType, FuncInput_ToneDur_text,  ...
     param,...
     save_poststepFigs, paths_NASTD_ECoG)
@@ -184,6 +184,10 @@ for i_sub = 1:length(subs)
             
         end
         
+        % --- Compute sampling rate and post-tone window ---
+        fs = 1 / mean(diff(temp_DataClean_CleanTrialsElecs.time{1}));
+        nSamples_post = round(1 * fs); % 1 second after tone
+
         %1.6 Extract p1-33, p33, and p34 for each trial
         %Define parameters depending on TD
         temp_nTrials             = length(temp_DataClean_CleanTrialsElecs.trial);
@@ -228,10 +232,18 @@ for i_sub = 1:length(subs)
         
         %Initialize and fill 3D data arrays (dim: nSens, nSamples per tone,
         %nTrials) and copy electrode lebels so that we find electrode indices
-        ERFdata.p33{i_sub, i_TD} = zeros(temp_nSensors, ...
-            length(StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(1,1):StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(1,2)), ...
-            temp_nTrials);
-        ERFdata.p34{i_sub, i_TD} = ERFdata.p33{i_sub, i_TD};
+        
+        % Base tone length (same as before)
+        tone_len = length(StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(1,1): ...
+            StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(1,2));
+        
+        % Extended length for p34 (+1s)
+        p34_len = tone_len + nSamples_post;
+        
+        ERFdata.p33{i_sub, i_TD} = zeros(temp_nSensors, tone_len, temp_nTrials);
+        ERFdata.p34{i_sub, i_TD} = nan(temp_nSensors, p34_len, temp_nTrials); % <-- now padded-ready
+        ERFdata.p32{i_sub, i_TD} = ERFdata.p33{i_sub, i_TD};
+        
         ERFdata.elec_labels{i_sub, i_TD} = temp_DataClean_CleanTrialsElecs.label;
         
         %copy trial wise info (i.e., all samples for selected tone for all channels and all trials into data arrays
@@ -240,10 +252,27 @@ for i_sub = 1:length(subs)
                 temp_DataClean_CleanTrialsElecs.trial{i_trial}(:, ...
                 StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(param.ToneIndex,1) : ...
                 StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(param.ToneIndex,2));
-            ERFdata.p34{i_sub, i_TD}(:, :, i_trial) = ...
+            
+            % --- p34 with +1s post-tone and NaN padding ---
+            start_idx = StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(param.ToneIndex+1,1);
+            end_idx_nominal = StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(param.ToneIndex+1,2);
+            end_idx_extended = end_idx_nominal + nSamples_post;
+            max_idx = size(temp_DataClean_CleanTrialsElecs.trial{i_trial}, 2);
+            % Actual available end index
+            end_idx_actual = min(end_idx_extended, max_idx);
+            % Extract available data
+            temp_segment = temp_DataClean_CleanTrialsElecs.trial{i_trial}(:, start_idx:end_idx_actual);
+            % Create NaN-padded container (preallocated size already matches)
+            temp_padded = nan(temp_nSensors, p34_len);
+            % Fill available portion
+            temp_padded(:,1:size(temp_segment,2)) = temp_segment;
+            % Store
+            ERFdata.p34{i_sub, i_TD}(:,:,i_trial) = temp_padded;
+            
+            ERFdata.p32{i_sub, i_TD}(:, :, i_trial) = ...
                 temp_DataClean_CleanTrialsElecs.trial{i_trial}(:, ...
-                StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(param.ToneIndex+1,1) : ...
-                StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(param.ToneIndex+1,2));
+                StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(param.ToneIndex-1,1) : ...
+                StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(param.ToneIndex-1,2));
             ERFdata.p1p33{i_sub, i_TD}(:, :, i_trial) = ...
                 temp_DataClean_CleanTrialsElecs.trial{i_trial}(:, ...
                 StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(1,1) : ...
@@ -262,6 +291,33 @@ for i_sub = 1:length(subs)
         ERFdata.MinNumTrialsperpredp34(i_sub, i_TD) = ...
             min(ERFdata.NumTrialsperpredp34(i_sub, :));
         
+        %% 1.8 Separate trials by p32 (frequency at tone 32)
+        % Read out p32 frequency for each trial
+        temp_p32_freq = nan(temp_nTrials,1);
+        
+        for i_trial = 1:temp_nTrials
+            temp_p32_freq(i_trial) = ...
+                temp_DataClean_CleanTrialsElecs.behav.stim.series_f{i_trial}(32);
+        end
+        
+        % Identify unique frequencies (conditions)
+        [p32_unique_freqs, ~, freq_idx] = unique(temp_p32_freq);
+        
+        % Store labels (useful later for plotting)
+        ERFdata.p32_freq_labels{i_sub, i_TD} = p32_unique_freqs;
+        
+        % Initialize indexing structure
+        for i_freq = 1:length(p32_unique_freqs)
+            
+            % Find trials belonging to this frequency
+            ERFdata.Index_p32{i_sub, i_TD}{i_freq} = find(freq_idx == i_freq);
+            
+            % Store number of trials per frequency
+            ERFdata.NumTrialsper_p32(i_sub, i_TD, i_freq) = ...
+                length(ERFdata.Index_p32{i_sub, i_TD}{i_freq});
+        end
+
+        
         clear temp*
     end
     
@@ -271,6 +327,87 @@ for i_sub = 1:length(subs)
 end
 disp(['-- Preparing pre-processed data for all subjects finished after: ' ...
     num2str(round(toc/60,2)) 'min --']) %About 20 min for n = 9 per TD
+
+save(['ERFdata_' FuncInput_DataType '_longP34.mat'], 'ERFdata', '-v7.3');
+ERFdata=load(['ERFdata_' FuncInput_DataType '_longP34.mat']);
+ERFdata = ERFdata.ERFdata;
+
+%% Plot p34 + 1s after tone end to look at sound-evoked activity
+fs = 512; % sampling rate
+
+nSubs = size(ERFdata.p34,1);
+nTD   = size(ERFdata.p34,2);
+
+TD_labels = {'0.2s TD','0.4s TD'};
+TD_durations = [0.2 0.4]; % in seconds
+colors = lines(nTD);
+
+figure; hold on;
+
+for i_TD = 1:nTD
+    
+    all_data_concat = []; % will become [time x pooled observations]
+    
+    for i_sub = 1:nSubs
+        
+        data = ERFdata.p34{i_sub, i_TD}; 
+        % size: sensors x time x trials
+        
+        % reshape → collapse sensors + trials
+        data_reshaped = reshape(data, size(data,1), size(data,2), size(data,3));
+        
+        % average over sensors first (optional but cleaner)
+        data_sens_avg = squeeze(nanmean(data_reshaped,1)); 
+        % now: time x trials
+        
+        % concatenate trials across subjects
+        all_data_concat = [all_data_concat, data_sens_avg]; 
+        % grows: time x (all trials across subs)
+    end
+    
+    % average across all trials (and thus subjects implicitly)
+    mean_timecourse = nanmean(all_data_concat,2); % time x 1
+    
+    % time axis (seconds)
+    t = (0:length(mean_timecourse)-1) / fs;
+    
+    % plot
+    h_plot(i_TD) = plot(t, mean_timecourse, ...
+    'LineWidth', 2, 'Color', colors(i_TD,:));
+    
+    % --- TD-specific tone offset line ---
+    xline(TD_durations(i_TD), '--', ...
+        'Color', colors(i_TD,:), ...
+        'LineWidth', 1.5);
+    
+end
+
+tone_len1 = size(ERFdata.p33{1,1},2); % same across subs within TD
+tone_len2 = size(ERFdata.p33{1,2},2); % same across subs within TD
+
+xline(tone_len1/fs, '--', 'Tone offset', ...
+    'Color', colors(1,:), 'LineWidth', 1.5, 'HandleVisibility','off');
+
+xline(tone_len2/fs, '--', 'Tone offset', ...
+    'Color', colors(2,:), 'LineWidth', 1.5, 'HandleVisibility','off');
+
+xline(tone_len1/fs + 0.4, ':', 'Blank offset', ...
+    'Color', colors(1,:), 'LineWidth', 1.5, 'HandleVisibility','off');
+
+xline(tone_len2/fs + 0.4, ':', 'Blank offset', ...
+    'Color', colors(2,:), 'LineWidth', 1.5, 'HandleVisibility','off');
+
+xlabel('Time (s)');
+ylabel('Amplitude');
+yl = ylim;
+ylim([yl(1), yl(2)+0.01]);
+title(['p34 ERF (' FuncInput_DataType ') across subjects, sensors, trials'], ...
+    'Interpreter', 'none');
+legend(h_plot, TD_labels);
+grid on;
+filename     = ['extended_p34_ERF_' FuncInput_DataType '.png'];
+figfile      = [path_fig filename];
+saveas(gcf, figfile, 'png'); %save png version
 
 
 %% 2) Load current effect data and aggregate data across subjects
@@ -681,6 +818,10 @@ if ~isempty(SignElecs.index)
         maxY = max([max(Avgp33{1}(:)), max(Avgp33{2}(:)), max(Avgp33{3}(:))]);
         minY = min([min(Avgp33{1}(:)), min(Avgp33{2}(:)), min(Avgp33{3}(:))]);
         
+        pad = abs(max([minY maxY]) * 0.05);
+        ylims_per_elec{i_signelec} = [minY - pad, maxY + pad];
+        ERFdata.ylims_per_elec = ylims_per_elec;
+        
         sign_samples = Param2plot.per_sub.cluster_timecourse{ind_curr_sub, ind_curr_TD}(ind_curr_elec_currsub,:) > 0;
         area(1:length(sign_samples), ...
             sign_samples * ...
@@ -750,8 +891,51 @@ if ~isempty(SignElecs.index)
         close all;
     end
     
+
+    %% 8) Plot ERF of p33 per p32 condition
+    % Collect all p32 frequencies across subjects and TDs
+    all_p32_freqs = [];
+
+    for i_sub = 1:length(subs)
+        for i_TD = 1:length(FuncInput_ToneDur_text)
+            all_p32_freqs = [all_p32_freqs; ...
+                ERFdata.p32_freq_labels{i_sub, i_TD}(:)];
+        end
+    end
+
+    % Get unique sorted frequencies
+    global_p32_freqs = unique(all_p32_freqs);
+
+    % Store
+    ERFdata.global_p32_freqs = global_p32_freqs;
+
+    n_global = length(global_p32_freqs);
+
+    cmap_global = parula(n_global);   % or turbo, jet, etc.
     
-    %% 6) Plot figure showing surf with sign. elecs and p1-p33 ERFs per p*34 condition
+    %% To plot all eight frequencies separately comment out below, otherwise group by 200, 400 and 800 Hz freqs
+    % Define frequency groups (in Hz)
+    freq_groups = [200 400 800];
+
+    % Assign each global frequency to a group
+    global_freq_group_idx = zeros(size(global_p32_freqs));
+
+    for i = 1:length(global_p32_freqs)
+        [~, idx] = min(abs(global_p32_freqs(i) - freq_groups));
+        global_freq_group_idx(i) = idx; % 1=200, 2=400, 3=800
+    end
+
+    ERFdata.global_freq_group_idx = global_freq_group_idx;
+    ERFdata.freq_groups = freq_groups;
+
+    % Define fixed colors for the 3 groups (reuse your old colors)
+    cmap_groups = [
+        0.85, 0.1, 0.1;     % red
+        0.0,  0.5, 0.0;     % dark green
+        0.5,  0.0, 0.5      % purple
+        ];
+    
+    
     %Determine number of subplots (surf + 1 subplot per sign. elec)
     num_subplot = SignElecs.num_elecs + 4;
     DimSubplot = [ceil(sqrt(num_subplot)), ceil(sqrt(num_subplot))];
@@ -759,7 +943,7 @@ if ~isempty(SignElecs.index)
     SubplotPos_ERF = [3:DimSubplot(1) DimSubplot(1)+3:num_subplot];
     
     %Prepare figure
-    h = figure('visible','off'); %ensures figure doesn't pop up during plotting
+    h = figure('visible','on'); %ensures figure doesn't pop up during plotting
     set(gcf,'units','normalized','outerposition',[0 0 1 1]) %full screen
     set(gcf,'renderer','opengl');
     
@@ -820,36 +1004,91 @@ if ~isempty(SignElecs.index)
             strtok(SignElecs.labels{i_signelec},' ')));
         label_curr_elec = SignElecs.labels{i_signelec};
         
-        %For current electrode, Compute AVG + STD across trials per Predp34 condition
-        for i_Predp34 = 1:length(label_Predp34)
-            temp_ERFdata_perp34 = [];
-            for i_trial = 1:length(ERFdata.Index_Predp34{ind_curr_sub, ind_curr_TD}{i_Predp34})
-                temp_ERFdata_perp34(i_trial,:) = ...
-                    ERFdata.p1p33{ind_curr_sub, ind_curr_TD}...
-                    (ind_curr_elec_currsub,:,ERFdata.Index_Predp34{ind_curr_sub, ind_curr_TD}{i_Predp34}(i_trial));
-            end
-            Avgp1p33{i_Predp34} = nanmean(temp_ERFdata_perp34,1);
-            STDp1p33{i_Predp34} = nanstd(temp_ERFdata_perp34,1,1);
+        %For current electrode, Compute AVG + STD across trials per P32 condition
+        p32_freqs = ERFdata.p32_freq_labels{ind_curr_sub, ind_curr_TD};
+        %n_freqs   = length(p32_freqs);
+        
+        n_freqs = length(freq_groups);
+        
+        Avgp33 = cell(n_freqs,1);
+        STDp33 = cell(n_freqs,1);
+        
+        % Comment below if not using grouped frequencies
+        trials_per_group = cell(n_freqs,1);
+        for i_freq = 1:length(p32_freqs)
+            % find this freq in global list
+            idx_global = find(abs(ERFdata.global_p32_freqs - p32_freqs(i_freq)) < tol, 1);
+            % get its group (1,2,3)
+            group_idx = ERFdata.global_freq_group_idx(idx_global);
+            % force column vector
+            trials = ERFdata.Index_p32{ind_curr_sub, ind_curr_TD}{i_freq}(:);
+            % concatenate vertically (safe)
+            trials_per_group{group_idx} = [ ...
+                trials_per_group{group_idx}; ...
+                trials ...
+                ];
+        end
+        for i_group = 1:n_freqs
+            trials_per_group{i_group} = unique(trials_per_group{i_group});
         end
         
+        for i_group = 1:n_freqs
+            trials_idx = trials_per_group{i_group};
+            temp = [];
+            for i_trial = 1:length(trials_idx)
+                temp(i_trial,:) = ERFdata.p33{ind_curr_sub, ind_curr_TD}(...
+                    ind_curr_elec_currsub,:,trials_idx(i_trial));
+            end
+            Avgp33{i_group} = nanmean(temp,1);
+            STDp33{i_group} = nanstd(temp,1,1);
+        end
+        
+        plot_param.color = cell(n_freqs,1);
+        for i_group = 1:n_freqs
+            plot_param.color{i_group} = [cmap_groups(i_group,:) 0.9];
+        end
+        
+%         for i_freq = 1:n_freqs
+%             
+%             trials_idx = ERFdata.Index_p32{ind_curr_sub, ind_curr_TD}{i_freq};
+%             
+%             temp = [];
+%             for i_trial = 1:length(trials_idx)
+%                 temp(i_trial,:) = ERFdata.p33{ind_curr_sub, ind_curr_TD}(...
+%                     ind_curr_elec_currsub,:,trials_idx(i_trial));
+%             end
+%             
+%             Avgp33{i_freq} = nanmean(temp,1);
+%             STDp33{i_freq} = nanstd(temp,1,1);
+%         end
+        
         %Determine trace colors
-        plot_param.color = ...
-            {[0, 0.4470, 0.7410, 0.7], ...
-            [0, 0.75, 0.75, 0.7],[0.8500, ...
-            0.3250, 0.0980, 0.7]};
+%         plot_param.color = cell(n_freqs,1);
+%         tol = 1e-6; % for float comparison
+%         for i_freq = 1:n_freqs
+%             % match this electrode's frequency to global list
+%             idx_global = find(abs(ERFdata.global_p32_freqs - p32_freqs(i_freq)) < tol, 1);
+%             if isempty(idx_global)
+%                 error('p32 frequency not found in global list');
+%             end
+%             % assign consistent color
+%             plot_param.color{i_freq} = [cmap_global(idx_global,:) 0.9];
+%         end
         
         %Plot ERF for sign  elecs
         subplot(DimSubplot(1),DimSubplot(2),SubplotPos_ERF(subplot_counter))
-        
-        plot(1:length(Avgp1p33{1}(:)),Avgp1p33{1}(:),...
-            'color',plot_param.color{1},'LineWidth', 2)
+       
+%         hold on;
+%         for i_freq = 1:n_freqs
+%             plot(1:length(Avgp33{i_freq}), Avgp33{i_freq}, ...
+%                 'color', plot_param.color{i_freq}, 'LineWidth', 2)
+%         end
+
         hold on;
-        plot(1:length(Avgp1p33{2}(:)),Avgp1p33{2}(:),...
-            'color',plot_param.color{2},'LineWidth', 2)
-        hold on;
-        plot(1:length(Avgp1p33{3}(:)),Avgp1p33{3}(:),...
-            'color',plot_param.color{3},'LineWidth', 2)
-        axis tight
+        for i_group = 1:n_freqs
+            plot(1:length(Avgp33{i_group}), Avgp33{i_group}, ...
+                'color', plot_param.color{i_group}, 'LineWidth', 2)
+        end
         
         %Change x-axis labeling to time [s]
         temp_xticks = xticks;
@@ -858,33 +1097,107 @@ if ~isempty(SignElecs.index)
             temp_text = [temp_text num2str(round(temp_xticks(i_xtick)/SampleFreq,2))];
         end
         xticklabels(temp_text)
-        xlabel('p1-p33 [s]')
+        xlabel('p33 [s]')
         
-        %Add demarcation lines for tones
-        a = axis;
-        %     for i_tone = 1:size(StimTiming.Sample_Tone_StartStop{ind_curr_sub, ind_curr_TD},1)
-        %         ind_start = StimTiming.Sample_Tone_StartStop{ind_curr_sub, ind_curr_TD}(i_tone, 1) - StimTiming.Sample_Tone_StartStop{ind_curr_sub, ind_curr_TD}(1, 1);
-        %         hold on;
-        %         plot([ind_start ind_start],[a(3) a(4)], 'Color',[0.5 0.5 0.5])
-        %     end
-        for i_tone = [10 20 30 33]
-            ind_start = StimTiming.Sample_Tone_StartStop{ind_curr_sub, ind_curr_TD}(i_tone, 1) - ...
-                StimTiming.Sample_Tone_StartStop{ind_curr_sub, ind_curr_TD}(1, 1);
-            hold on;
-            plot([ind_start ind_start],[a(3) a(4)], 'Color',[0 0 0], 'LineWidth', 1)
+        %Highlight sign. samples/clusters
+        grey  = [100 100 100]./255;
+        maxY = max(cellfun(@(x) max(x(:)), Avgp33));
+        minY = min(cellfun(@(x) min(x(:)), Avgp33));
+        
+        sign_samples = Param2plot.per_sub.cluster_timecourse{ind_curr_sub, ind_curr_TD}(ind_curr_elec_currsub,:) > 0;
+        area(1:length(sign_samples), ...
+            sign_samples * ...
+            (max([minY maxY])+abs(max([minY maxY])*0.05)),...
+            'basevalue',0,'FaceColor',grey,'FaceAlpha', 0.3, 'LineStyle','none');
+        if min([minY maxY]) < 0
+            area(1:length(sign_samples), ...
+                sign_samples * ...
+                (min([minY maxY])-abs(min([minY maxY])*0.05)),...
+                'basevalue',0,'FaceColor',grey,'FaceAlpha', 0.3, 'LineStyle','none');
         end
+        
+        %Add cluster pval as text to shading
+        for i_cluster = 1:sum(~isnan(...
+                Param2plot.per_sub.pval{ind_curr_sub, ind_curr_TD}(ind_curr_elec_currsub,:)))
+            if Param2plot.per_sub.pval{ind_curr_sub, ind_curr_TD}(ind_curr_elec_currsub,i_cluster) ...
+                    < param.pval_plotting
+                shading_startsample = ...
+                    find(Param2plot.per_sub.cluster_timecourse{ind_curr_sub, ind_curr_TD}...
+                    (ind_curr_elec_currsub,:) == i_cluster);
+                text(shading_startsample(1),max([minY maxY] * 0.8), ...
+                    [' p = ' num2str(round(...
+                    Param2plot.per_sub.pval{ind_curr_sub, ind_curr_TD}...
+                    (ind_curr_elec_currsub, i_cluster),3))], ...
+                    'FontSize',8);
+            end
+        end
+        
+        %Scale y-axis to show sign. text if present
+        ylim(ERFdata.ylims_per_elec{i_signelec});
         
         %subplot title
         title([labels_plotting_number{SignElecs.index(i_signelec)} ' ' ...
             AnatReg_allSubs{2}.CatLabels{SignElecs.index_AnatCat(i_signelec)} ' ' ...
-            label_curr_elec],'FontSize',8,'Interpreter','none')
+            label_curr_elec ' ' FuncInput_ToneDur_text{ind_curr_TD} 's TD'],'FontSize',8,'Interpreter','none')
         
     end
+    
+%     % Create invisible axes spanning the whole figure
+%     ax_legend = axes('Position',[0 0 1 1],'Visible','off');
+%     hold(ax_legend, 'on');
+%     
+%     % Create dummy lines for legend
+%     h_legend = gobjects(n_global,1);
+%     for i = 1:n_global
+%         h_legend(i) = plot(ax_legend, nan, nan, ...
+%             'color', cmap_global(i,:), 'LineWidth', 2);
+%     end
+%     
+%     % Create legend attached to this invisible axes
+%     lgd = legend(ax_legend, h_legend, ...
+%         arrayfun(@(x) [num2str(round(x)) ' Hz'], global_p32_freqs, 'UniformOutput', false), ...
+%         'Location', 'eastoutside');
+%     
+%     lgd.Units = 'normalized';
+%     pos = lgd.Position;
+%     
+%     pos(1) = pos(1) - 0.02;   % move left (increase if needed)
+%     pos(3) = pos(3) * 0.9;    % optional: slightly narrower
+%     lgd.Position = pos;
+
+    % Create invisible axes spanning the whole figure
+    ax_legend = axes('Position',[0 0 1 1],'Visible','off');
+    hold(ax_legend, 'on');
+
+    % Number of groups (should be 3)
+    n_groups = length(freq_groups);
+
+    % Create dummy lines for legend
+    h_legend = gobjects(n_groups,1);
+    for i = 1:n_groups
+        h_legend(i) = plot(ax_legend, nan, nan, ...
+            'color', cmap_groups(i,:), 'LineWidth', 2);
+    end
+
+    % Labels for groups
+    legend_labels = {'Low p32', 'Medium p32', 'High p32'};
+
+    % Create legend
+    lgd = legend(ax_legend, h_legend, legend_labels, ...
+        'Location', 'eastoutside');
+
+    % Adjust position
+    lgd.Units = 'normalized';
+    pos = lgd.Position;
+
+    pos(1) = pos(1) - 0.02;   % move left
+    pos(3) = pos(3) * 0.9;    % slightly narrower
+    lgd.Position = pos;
     
     %Adjust figureheader/title
     switch FuncInput_EffectType
         case 'PredEffect'
-            effect_text = ['Effect: Prediction (explain p33 activity by p*34);' ...
+            effect_text = ['Effect: Explain p33 activity by p32;' ...
                 ' p < ' num2str(param.pval_plotting) ' ' FDR_label];
         case 'SimplePredErrEffect'
             effect_text = ['Effect: Simple Prediction error' ...
@@ -902,157 +1215,439 @@ if ~isempty(SignElecs.index)
     sgtitle(Fig_title,'FontSize',18,'Interpreter','none')
     
     if save_poststepFigs == 1
-        filename     = ['Surf1HERFp1p33_SignElec' param.ElecSelect ...
+        filename     = ['Surf1HERFp33_SignElec' param.ElecSelect ...
             '_Allsubn' num2str(length(subs)) '_' ...
             FuncInput_EffectType '_' FuncInput_DataType ...
+            'byp32_AllTD_Stat' FDR_label '.png'];
+        figfile      = [path_fig filename];
+        saveas(gcf, figfile, 'png'); %save png version
+        close all;
+    end
+    
+    
+       %% 9) Plot ERF of p34 for 1sec after offset of tone
+    
+    %Determine number of subplots (surf + 1 subplot per sign. elec)
+    num_subplot = SignElecs.num_elecs + 4;
+    DimSubplot = [ceil(sqrt(num_subplot)), ceil(sqrt(num_subplot))];
+    SubplotPos_Surf = [1 2 DimSubplot(1)+1 DimSubplot(1)+2]; %4 subplots in upper left quadrant
+    SubplotPos_ERF = [3:DimSubplot(1) DimSubplot(1)+3:num_subplot];
+    
+    %Prepare figure
+    h = figure('visible','on'); %ensures figure doesn't pop up during plotting
+    set(gcf,'units','normalized','outerposition',[0 0 1 1]) %full screen
+    set(gcf,'renderer','opengl');
+    
+    %Determine parameter to be plotted and set up plotting struct
+    for i_elec = 1:length(Param2plot.all_subs.pval_derivative)
+        PlotInput(i_elec,1) = max(Param2plot.all_subs.pval_derivative(i_elec,:));
+    end
+    
+    %Colorlim
+    clims               = [0 max(PlotInput)];
+    Label_Colorbar      = '- log10 (cluster p-value) ';
+    
+    dat.dimord          = 'chan_time';
+    dat.time            = 0;
+    dat.label           = labels_allsub;
+    dat.avg             = PlotInput;
+    dat.sign_elecs      = SignElecs.array;
+    dat.textcolor_rgb   = [1 0 0];
+    SizeFactor          = 4;
+    
+    chanSize = ones(1,length(dat.avg))*SizeFactor; %electrode size (arbitrary)
+    cmap        = 'parula';
+    
+    SubplotPosition = [0 0 0 0];
+    
+    %Project all electrodes on one hemisphere,
+    coords_allsub(:,1) = abs(coords_allsub(:,1)) * -1;
+    
+    %Plot surface
+    sp_handle_surf_temp = NASTD_ECoG_Plot_SubplotSignElecsSurf_Label_LH...
+        (coords_allsub, labels_plotting_number, dat.avg, SignElecs.array,...
+        chanSize, clims, cmap, dat.textcolor_rgb, ...
+        DimSubplot, [1 2 DimSubplot(1)+1 DimSubplot(1)+2], SubplotPosition, [], []);
+    
+    sp_handle_surf = sp_handle_surf_temp.L;
+    
+    %Colorbar
+    ColorbarPosition    = [sp_handle_surf.Position(1) sp_handle_surf.Position(2) 1 1];
+    h = colorbar;
+    h.Position(4)       = h.Position(4)*ColorbarPosition(4); %makes colorbar shorter
+    h.Label.String      = Label_Colorbar;
+    h.FontSize          = 12;
+    caxis(clims)
+    
+    %Plot ERFs for each sign. electrode
+    %Order sign. elecs based on anatomical parcellation
+    [~, index_anatorder] = sort(SignElecs.index_AnatCat);
+    subplot_counter = 0;
+    for i_signelec = index_anatorder'
+        subplot_counter = subplot_counter + 1;
+        
+        %Determine information for current electrode
+        ind_curr_sub                = Param2plot.all_subs.sub_index(SignElecs.index(i_signelec)); %Sub of current elec
+        ind_curr_TD                 = Param2plot.all_subs.TD_index(SignElecs.index(i_signelec)); %TD of current elec
+        ind_curr_elec_allelecs      = SignElecs.index(i_signelec); %Index of current elec in across-sub elec list
+        ind_curr_elec_currsub  = ... %Index of current elec in current-sub elec list
+            find(strcmp(ERFdata.elec_labels{ind_curr_sub, ind_curr_TD}, ...
+            strtok(SignElecs.labels{i_signelec},' ')));
+        label_curr_elec = SignElecs.labels{i_signelec};
+        
+        %For current electrode, Compute AVG + STD across trials
+       
+        temp = ERFdata.p34{ind_curr_sub, ind_curr_TD}(...
+                ind_curr_elec_currsub,:,:);
+        Avgp34 = nanmean(temp,3);
+        STDp34 = nanstd(temp,1,3);
+        
+        %Plot ERF for sign  elecs
+        subplot(DimSubplot(1),DimSubplot(2),SubplotPos_ERF(subplot_counter))
+       
+        hold on;
+        plot(1:length(Avgp34), Avgp34, 'LineWidth', 2)
+        tone_len_sec = size(temp,2) / SampleFreq;
+        if ind_curr_TD == 1
+            tone_offset = 0.2;
+        else
+            tone_offset = 0.4;
+        end
+        tone_offset_x = tone_offset * SampleFreq;
+        
+        xline(tone_offset_x, '--', 'Tone offset', ...
+            'Color', [0 0 0], ...
+            'LabelVerticalAlignment', 'top', ...
+            'LabelHorizontalAlignment', 'left');
+        
+        blank_offset_x = tone_offset_x + 0.4 * SampleFreq;
+        
+        xline(blank_offset_x, ':', 'Blank offset', ...
+            'Color', [0 0 0], ...
+            'LabelVerticalAlignment', 'top', ...
+            'LabelHorizontalAlignment', 'left');
+        
+        %Change x-axis labeling to time [s]
+        temp_xticks = xticks;
+        temp_text = {};
+        for i_xtick = 1:length(temp_xticks)
+            temp_text = [temp_text num2str(round(temp_xticks(i_xtick)/SampleFreq,2))];
+        end
+        xticklabels(temp_text)
+        xlabel('p34 [s]')
+        
+        maxY = max(Avgp34);
+        minY = min(Avgp34);
+        
+        %subplot title
+        title([labels_plotting_number{SignElecs.index(i_signelec)} ' ' ...
+            AnatReg_allSubs{2}.CatLabels{SignElecs.index_AnatCat(i_signelec)} ' ' ...
+            label_curr_elec ' ' FuncInput_ToneDur_text{ind_curr_TD} 's TD'],'FontSize',8,'Interpreter','none')
+        ylim([minY-0.05*abs(minY) - 0.05, maxY+0.05*abs(maxY) + 0.05]);
+    end
+    
+    
+    Fig_title = {['Group level (n = ' num2str(length(subs)) ') - extended p34 ERF'] ...
+        ['Input data: ' FuncInput_DataType ', Pooled TD - Output: ' ...
+        num2str(SignElecs.num_elecs) ' sign. elecs, ' num2str(SignElecs.num_cluster) ' sign. cluster']} ;
+    sgtitle(Fig_title,'FontSize',18,'Interpreter','none')
+    
+    if save_poststepFigs == 1
+        filename     = ['Surf1HERFp34_SignElec' param.ElecSelect ...
+            '_Allsubn' num2str(length(subs)) '_' FuncInput_DataType ...
             '_AllTD_Stat' FDR_label '.png'];
         figfile      = [path_fig filename];
         saveas(gcf, figfile, 'png'); %save png version
         close all;
     end
     
-%     %% 7) Plot figure showing surf with sign. elecs and p34 ERFs per p*34 condition
-%     %Determine number of subplots (surf + 1 subplot per sign. elec)
-%     num_subplot = SignElecs.num_elecs + 4;
-%     DimSubplot = [ceil(sqrt(num_subplot)), ceil(sqrt(num_subplot))];
-%     SubplotPos_Surf = [1 2 DimSubplot(1)+1 DimSubplot(1)+2]; %4 subplots in upper left quadrant
-%     SubplotPos_ERF = [3:DimSubplot(1) DimSubplot(1)+3:num_subplot];
-%     
-%     %Prepare figure
-%     h = figure('visible','on'); %ensures figure doesn't pop up during plotting
-%     set(gcf,'units','normalized','outerposition',[0 0 1 1]) %full screen
-%     set(gcf,'renderer','opengl');
-%     
-%     %Determine parameter to be plotted and set up plotting struct
-%     for i_elec = 1:length(Param2plot.all_subs.pval_derivative)
-%         PlotInput(i_elec,1) = max(Param2plot.all_subs.pval_derivative(i_elec,:));
-%     end
-%     
-%     %Colorlim
-%     clims               = [0 max(PlotInput)];
-%     Label_Colorbar      = '- log10 (cluster p-value) ';
-%     
-%     dat.dimord          = 'chan_time';
-%     dat.time            = 0;
-%     dat.label           = labels_allsub;
-%     dat.avg             = PlotInput;
-%     dat.sign_elecs      = SignElecs.array;
-%     dat.textcolor_rgb   = [1 0 0];
-%     SizeFactor          = 4;
-%     
-%     chanSize = ones(1,length(dat.avg))*SizeFactor; %electrode size (arbitrary)
-%     cmap        = 'parula';
-%     
-%     SubplotPosition = [0 0 0 0];
-%     
-%     %Project all electrodes on one hemisphere,
-%     coords_allsub(:,1) = abs(coords_allsub(:,1)) * -1;
-%     
-%     %Plot surface
-%     sp_handle_surf_temp = NASTD_ECoG_Plot_SubplotSignElecsSurf_Label_LH...
-%         (coords_allsub, labels_plotting_number, dat.avg, SignElecs.array,...
-%         chanSize, clims, cmap, dat.textcolor_rgb, ...
-%         DimSubplot, [1 2 DimSubplot(1)+1 DimSubplot(1)+2], SubplotPosition, [], []);
-%     
-%     sp_handle_surf = sp_handle_surf_temp.L;
-%     
-%     %Colorbar
-%     ColorbarPosition    = [sp_handle_surf.Position(1) sp_handle_surf.Position(2) 1 1];
-%     h = colorbar;
-%     h.Position(4)       = h.Position(4)*ColorbarPosition(4); %makes colorbar shorter
-%     h.Label.String      = Label_Colorbar;
-%     h.FontSize          = 12;
-%     caxis(clims)
-%     
-%     %Plot ERFs for each sign. electrode
-%     %Order sign. elecs based on anatomical parcellation
-%     [~, index_anatorder] = sort(SignElecs.index_AnatCat);
-%     subplot_counter = 0;
-%     for i_signelec = index_anatorder'
-%         subplot_counter = subplot_counter + 1;
-%         
-%         %Determine information for current electrode
-%         ind_curr_sub                = Param2plot.all_subs.sub_index(SignElecs.index(i_signelec)); %Sub of current elec
-%         ind_curr_TD                 = Param2plot.all_subs.TD_index(SignElecs.index(i_signelec)); %TD of current elec
-%         ind_curr_elec_allelecs      = SignElecs.index(i_signelec); %Index of current elec in across-sub elec list
-%         ind_curr_elec_currsub  = ... %Index of current elec in current-sub elec list
-%             find(strcmp(ERFdata.elec_labels{ind_curr_sub, ind_curr_TD}, ...
-%             strtok(SignElecs.labels{i_signelec},' ')));
-%         label_curr_elec = SignElecs.labels{i_signelec};
-%         
-%         %For current electrode, Compute AVG + STD across trials per Predp34 condition
-%         for i_Predp34 = 1:length(label_Predp34)
-%             temp_ERFdata_perp34 = [];
-%             for i_trial = 1:length(ERFdata.Index_Predp34{ind_curr_sub, ind_curr_TD}{i_Predp34})
-%                 temp_ERFdata_perp34(i_trial,:) = ...
-%                     ERFdata.p34{ind_curr_sub, ind_curr_TD}...
-%                     (ind_curr_elec_currsub,:,ERFdata.Index_Predp34{ind_curr_sub, ind_curr_TD}{i_Predp34}(i_trial));
-%             end
-%             Avgp34{i_Predp34} = nanmean(temp_ERFdata_perp34,1);
-%             STDp34{i_Predp34} = nanstd(temp_ERFdata_perp34,1,1);
-%         end
-%         
-%         %Determine trace colors
-%         plot_param.color = ...
-%             {[0, 0.4470, 0.7410, 0.7], ...
-%             [0, 0.75, 0.75, 0.7],[0.8500, ...
-%             0.3250, 0.0980, 0.7]};
-%         
-%         %Plot ERF for sign  elecs
-%         subplot(DimSubplot(1),DimSubplot(2),SubplotPos_ERF(subplot_counter))
-%         
-%         plot(1:length(Avgp34{1}(:)),Avgp34{1}(:),...
-%             'color',plot_param.color{1},'LineWidth', 2)
-%         hold on;
-%         plot(1:length(Avgp34{2}(:)),Avgp34{2}(:),...
-%             'color',plot_param.color{2},'LineWidth', 2)
-%         hold on;
-%         plot(1:length(Avgp34{3}(:)),Avgp34{3}(:),...
-%             'color',plot_param.color{3},'LineWidth', 2)
-%         axis tight
-%         
-%         %Change x-axis labeling to time [s]
-%         temp_xticks = xticks;
-%         temp_text = {};
-%         for i_xtick = 1:length(temp_xticks)
-%             temp_text = [temp_text num2str(round(temp_xticks(i_xtick)/SampleFreq,2))];
-%         end
-%         xticklabels(temp_text)
-%         xlabel('p34 [s]')
-%         
-%         %subplot title
-%         title([labels_plotting_number{SignElecs.index(i_signelec)} ' ' ...
-%             AnatReg_allSubs{2}.CatLabels{SignElecs.index_AnatCat(i_signelec)} ' ' ...
-%             label_curr_elec],'FontSize',8,'Interpreter','none')
-%     end
-%     
-%     %Adjust figureheader/title
-%     switch FuncInput_EffectType
-%         case 'PredEffect'
-%             effect_text = ['Effect: Prediction (explain p33 activity by p*34);' ...
-%                 ' p < ' num2str(param.pval_plotting) ' ' FDR_label];
-%         case 'SimplePredErrEffect'
-%             effect_text = ['Effect: Simple Prediction error' ...
-%                 ' (explain p34 activity by absolute p33-p34 difference); p < ' ...
-%                 num2str(param.pval_plotting) ' ' FDR_label];
-%         case 'ComplexPredErrEffect'
-%             effect_text = ['Effect: Complex Prediction error' ...
-%                 ' (explain p34 activity by absolute p*34-p34 difference); p < ' ...
-%                 num2str(param.pval_plotting) ' ' FDR_label];
-%     end
-%     
-%     Fig_title = {['Group level (n = ' num2str(length(subs)) ') - ' effect_text] ...
-%         ['Input data: ' FuncInput_DataType ', Pooled TD - Output: ' ...
-%         num2str(SignElecs.num_elecs) ' sign. elecs, ' num2str(SignElecs.num_cluster) ' sign. cluster']} ;
-%     sgtitle(Fig_title,'FontSize',18,'Interpreter','none')
-%     
-%     if save_poststepFigs == 1
-%         filename     = ['Surf1HERFp34_SignElec' param.ElecSelect ...
-%             '_Allsubn' num2str(length(subs)) '_' ...
-%             FuncInput_EffectType '_' FuncInput_DataType ...
-%             '_AllTD_Stat' FDR_label '.png'];
-%         figfile      = [path_fig filename];
-%         saveas(gcf, figfile, 'png'); %save png version
-%         close all;
-%     end
+        %% 10) Plot ERF of p34 for 1sec after offset of tone for both TDs on each plot
+    
+    %Determine number of subplots (surf + 1 subplot per sign. elec)
+    num_subplot = SignElecs.num_elecs + 4;
+    DimSubplot = [ceil(sqrt(num_subplot)), ceil(sqrt(num_subplot))];
+    SubplotPos_Surf = [1 2 DimSubplot(1)+1 DimSubplot(1)+2]; %4 subplots in upper left quadrant
+    SubplotPos_ERF = [3:DimSubplot(1) DimSubplot(1)+3:num_subplot];
+    
+    %Prepare figure
+    h = figure('visible','on'); %ensures figure doesn't pop up during plotting
+    set(gcf,'units','normalized','outerposition',[0 0 1 1]) %full screen
+    set(gcf,'renderer','opengl');
+    
+    [unique_elec_names, ia] = unique( ...
+    cellfun(@(x) strtok(x,' '), SignElecs.labels, 'UniformOutput', false), ...
+    'stable');
+
+    index_unique = ia;
+
+    [~, index_anatorder] = sort(SignElecs.index_AnatCat(index_unique));
+    index_anatorder_unique = index_unique(index_anatorder);
+
+    color_TD1 = [0.8500 0.3250 0.0980]; % orange
+    color_TD2 = [0 0.4470 0.7410];      % blue
+
+    %Determine parameter to be plotted and set up plotting struct
+    for i_elec = 1:length(Param2plot.all_subs.pval_derivative)
+        PlotInput(i_elec,1) = max(Param2plot.all_subs.pval_derivative(i_elec,:));
+    end
+    
+    %Colorlim
+    clims               = [0 max(PlotInput)];
+    Label_Colorbar      = '- log10 (cluster p-value) ';
+    
+    dat.dimord          = 'chan_time';
+    dat.time            = 0;
+    dat.label           = labels_allsub;
+    dat.avg             = PlotInput;
+    dat.sign_elecs      = SignElecs.array;
+    dat.textcolor_rgb   = [1 0 0];
+    SizeFactor          = 4;
+    
+    chanSize = ones(1,length(dat.avg))*SizeFactor; %electrode size (arbitrary)
+    cmap        = 'parula';
+    
+    SubplotPosition = [0 0 0 0];
+    
+    %Project all electrodes on one hemisphere,
+    coords_allsub(:,1) = abs(coords_allsub(:,1)) * -1;
+    
+    %Plot surface
+    sp_handle_surf_temp = NASTD_ECoG_Plot_SubplotSignElecsSurf_Label_LH...
+        (coords_allsub, labels_plotting_number, dat.avg, SignElecs.array,...
+        chanSize, clims, cmap, dat.textcolor_rgb, ...
+        DimSubplot, [1 2 DimSubplot(1)+1 DimSubplot(1)+2], SubplotPosition, [], []);
+    
+    sp_handle_surf = sp_handle_surf_temp.L;
+    
+    %Colorbar
+    ColorbarPosition    = [sp_handle_surf.Position(1) sp_handle_surf.Position(2) 1 1];
+    h = colorbar;
+    h.Position(4)       = h.Position(4)*ColorbarPosition(4); %makes colorbar shorter
+    h.Label.String      = Label_Colorbar;
+    h.FontSize          = 12;
+    caxis(clims)
+    
+    %Plot ERFs for each sign. electrode
+    %Order sign. elecs based on anatomical parcellation
+    
+    legend_handles = [];
+    legend_labels  = {};
+    first_subplot = true;
+
+    [~, index_anatorder] = sort(SignElecs.index_AnatCat);
+    subplot_counter = 0;
+    for i_signelec = index_anatorder_unique'
+        
+        subplot_counter = subplot_counter + 1;
+        
+        % --- Identify electrode ---
+        ind_curr_sub = Param2plot.all_subs.sub_index(SignElecs.index(i_signelec));
+        % Find all entries corresponding to this electrode
+        elec_name = strtok(SignElecs.labels{i_signelec},' ');
+
+        all_matches = find(strcmp( ...
+            cellfun(@(x) strtok(x,' '), SignElecs.labels, 'UniformOutput', false), ...
+            elec_name));
+
+        sig_TDs = Param2plot.all_subs.TD_index(SignElecs.index(all_matches));
+        
+        elec_name = strtok(SignElecs.labels{i_signelec},' ');
+        label_curr_elec = SignElecs.labels{i_signelec};
+        
+        subplot(DimSubplot(1),DimSubplot(2),SubplotPos_ERF(subplot_counter))
+        hold on;
+        
+        all_vals = [];
+        
+        % =========================
+        % LOOP OVER TDs
+        % =========================
+        for i_TD_plot = 1:2
+            
+            labels_curr = ERFdata.elec_labels{ind_curr_sub, i_TD_plot};
+            ind_elec = find(strcmp(labels_curr, elec_name));
+            
+            if isempty(ind_elec)
+                continue
+            end
+            
+            % --- Extract data ---
+            temp = ERFdata.p34{ind_curr_sub, i_TD_plot}(ind_elec,:,:);
+            Avg  = nanmean(temp,3);
+            
+            all_vals = [all_vals; Avg(:)];
+            
+            % --- Color ---
+            if i_TD_plot == 1
+                col = color_TD1; % orange
+            else
+                col = color_TD2; % blue
+            end
+            
+            % --- Line style ---
+            is_significant = ismember(i_TD_plot, sig_TDs);
+
+            if length(sig_TDs) == 2
+                % Significant in BOTH TDs → both solid
+                ls = '-';
+                lw = 1.5;
+            else
+                % Only one TD significant
+                if is_significant
+                    ls = '-';  lw = 1.8;
+                else
+                    ls = '--'; lw = 1.5;
+                end
+            end
+            
+            % --- Plot ---
+            h = plot(1:length(Avg), Avg, ...
+                'Color', col, ...
+                'LineStyle', ls, ...
+                'LineWidth', lw);
+            
+            % --- Store legend handles ONLY ONCE ---
+            if first_subplot
+                legend_handles(i_TD_plot) = h;
+            end
+            
+        end
+        
+        % =========================
+        % TIMING LINES (BOTH TDs)
+        % =========================
+        
+        % TD1 (orange)
+        xline(0.2*SampleFreq, '--', ...
+            'Color', color_TD1, ...
+            'HandleVisibility','off');
+        
+        xline((0.2+0.4)*SampleFreq, ':', ...
+            'Color', color_TD1, ...
+            'HandleVisibility','off');
+        
+        % TD2 (blue)
+        xline(0.4*SampleFreq, '--', ...
+            'Color', color_TD2, ...
+            'HandleVisibility','off');
+        
+        xline((0.4+0.4)*SampleFreq, ':', ...
+            'Color', color_TD2, ...
+            'HandleVisibility','off');
+        
+        % =========================
+        % AXIS FORMATTING
+        % =========================
+        
+        temp_xticks = xticks;
+        xticklabels(arrayfun(@(x) num2str(round(x/SampleFreq,2)), ...
+            temp_xticks, 'UniformOutput', false))
+        
+        xlabel('Time (s)')
+        
+        % --- Title ---
+        title([labels_plotting_number{SignElecs.index(i_signelec)} ' ' ...
+            AnatReg_allSubs{2}.CatLabels{SignElecs.index_AnatCat(i_signelec)} ' ' ...
+            label_curr_elec ' ' FuncInput_ToneDur_text{ind_curr_TD} 's TD'], ...
+            'FontSize',8,'Interpreter','none')
+        
+        % =========================
+        % Y-LIMITS (BOTH TDs)
+        % =========================
+        
+        if ~isempty(all_vals)
+            minY = min(all_vals);
+            maxY = max(all_vals);
+            padding = 0.05 * (maxY - minY);
+            ylim([minY - padding, maxY + padding]);
+        end
+        
+        % =========================
+        % SIGNIFICANT TIME SHADING
+        % =========================
+
+        grey = [0.6 0.6 0.6];
+        
+        yl = ylim; % current y-limits
+        
+        % --- Get electrode name ---
+        elec_name = strtok(SignElecs.labels{i_signelec},' ');
+        
+        % --- Find all entries corresponding to this electrode ---
+        all_matches = find(strcmp( ...
+            cellfun(@(x) strtok(x,' '), SignElecs.labels, 'UniformOutput', false), ...
+            elec_name));
+        
+        % --- Find which TDs this electrode is significant in ---
+        sig_TDs = Param2plot.all_subs.TD_index(SignElecs.index(all_matches));
+        
+        % --- Loop over significant TDs individually ---
+        for td_idx = 1:length(sig_TDs)
+            i_sigTD = sig_TDs(td_idx);  % scalar, safe for indexing
+            
+            % Find this electrode in the current TD
+            labels_curr = ERFdata.elec_labels{ind_curr_sub, i_sigTD};
+            ind_elec = find(strcmp(labels_curr, elec_name));
+            
+            if isempty(ind_elec)
+                continue; % skip if electrode not found
+            end
+            
+            % Get significant samples for this electrode & TD
+%             if i_signelec == 2 
+%                 sig_samples = Param2plot.per_sub.cluster_timecourse{ind_curr_sub, i_sigTD}(ind_elec,:) > 0; 
+%                 sig_samples(1,113:180) = 1;
+            sig_samples = Param2plot.per_sub.cluster_timecourse{ind_curr_sub, i_sigTD}(ind_elec,:) > 0;
+            
+            % --- Find contiguous segments of significance ---
+            d = diff([0 sig_samples 0]);
+            start_idx = find(d == 1);
+            end_idx   = find(d == -1) - 1;
+            
+            % --- Draw shaded patches for each contiguous segment ---
+            for i_seg = 1:length(start_idx)
+                x1 = start_idx(i_seg);
+                x2 = end_idx(i_seg);
+                
+                patch([x1 x2 x2 x1], ...
+                    [yl(1) yl(1) yl(2) yl(2)], ...
+                    grey, ...
+                    'FaceAlpha', 0.2, ...
+                    'EdgeColor', 'none', ...
+                    'HandleVisibility','off');
+            end
+        end
+    end
+    
+    h_td1 = plot(nan, nan, '-', 'Color', color_TD1, 'LineWidth', 1.5);
+    h_td2 = plot(nan, nan, '-', 'Color', color_TD2, 'LineWidth', 1.5);
+
+    % --- Significance legend (black solid / dashed) ---
+    h_sig = plot(nan, nan, '-k',  'LineWidth', 1.5);
+    h_ns  = plot(nan, nan, '--k', 'LineWidth', 1.5);
+
+    % --- Create combined legend ---
+    lgd = legend([h_td1, h_td2, h_sig, h_ns], ...
+        {'TD1 (0.2 s)', 'TD2 (0.4 s)', 'sig', 'n.s.'});
+
+    % --- Position + styling ---
+    lgd.Units = 'normalized';
+    lgd.Position = [0.92 0.4 0.07 0.2]; % right side of figure
+    lgd.Box = 'on';
+    lgd.FontSize = 12;
+    lgd.LineWidth = 1;
+    
+    Fig_title = {['Group level (n = ' num2str(length(subs)) ') - extended p34 ERF'] ...
+        ['Input data: ' FuncInput_DataType ', Both TD - Output: ' ...
+        num2str(SignElecs.num_elecs) ' sign. elecs, ' num2str(SignElecs.num_cluster) ' sign. cluster']} ;
+    sgtitle(Fig_title,'FontSize',18,'Interpreter','none')
+    
+    if save_poststepFigs == 1
+        filename     = ['Surf1HERFp34_SignElec' param.ElecSelect ...
+            '_Allsubn' num2str(length(subs)) '_' FuncInput_DataType ...
+            '_BothTDplotted_Stat' FDR_label '.png'];
+        figfile      = [path_fig filename];
+        saveas(gcf, figfile, 'png'); %save png version
+        close all;
+    end
 end

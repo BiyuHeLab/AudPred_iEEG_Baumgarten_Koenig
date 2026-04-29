@@ -1,4 +1,4 @@
-function NASTD_ECoG_Predict_PlotERF4SignClusterElec_AllSubTD...
+function NASTD_ECoG_Predict_PlotERF4SignClusterElec_pitchregression_lk...
     (subs, FuncInput_EffectType, FuncInput_DataType, FuncInput_ToneDur_text,  ...
     param,...
     save_poststepFigs, paths_NASTD_ECoG)
@@ -232,6 +232,8 @@ for i_sub = 1:length(subs)
             length(StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(1,1):StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(1,2)), ...
             temp_nTrials);
         ERFdata.p34{i_sub, i_TD} = ERFdata.p33{i_sub, i_TD};
+        ERFdata.p32{i_sub, i_TD} = ERFdata.p33{i_sub, i_TD};
+        ERFdata.p31{i_sub, i_TD} = ERFdata.p33{i_sub, i_TD};
         ERFdata.elec_labels{i_sub, i_TD} = temp_DataClean_CleanTrialsElecs.label;
         
         %copy trial wise info (i.e., all samples for selected tone for all channels and all trials into data arrays
@@ -244,6 +246,14 @@ for i_sub = 1:length(subs)
                 temp_DataClean_CleanTrialsElecs.trial{i_trial}(:, ...
                 StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(param.ToneIndex+1,1) : ...
                 StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(param.ToneIndex+1,2));
+            ERFdata.p32{i_sub, i_TD}(:, :, i_trial) = ...
+                temp_DataClean_CleanTrialsElecs.trial{i_trial}(:, ...
+                StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(param.ToneIndex-1,1) : ...
+                StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(param.ToneIndex-1,2));
+            ERFdata.p31{i_sub, i_TD}(:, :, i_trial) = ...
+                temp_DataClean_CleanTrialsElecs.trial{i_trial}(:, ...
+                StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(param.ToneIndex-2,1) : ...
+                StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(param.ToneIndex-2,2));
             ERFdata.p1p33{i_sub, i_TD}(:, :, i_trial) = ...
                 temp_DataClean_CleanTrialsElecs.trial{i_trial}(:, ...
                 StimTiming.Sample_Tone_StartStop{i_sub, i_TD}(1,1) : ...
@@ -262,15 +272,659 @@ for i_sub = 1:length(subs)
         ERFdata.MinNumTrialsperpredp34(i_sub, i_TD) = ...
             min(ERFdata.NumTrialsperpredp34(i_sub, :));
         
-        clear temp*
+        %% 1.8 Separate trials by p32 (frequency at tone 32)
+        % Read out p32 frequency for each trial
+        temp_p32_freq = nan(temp_nTrials,1);
+        
+        for i_trial = 1:temp_nTrials
+            temp_p32_freq(i_trial) = ...
+                temp_DataClean_CleanTrialsElecs.behav.stim.series_f{i_trial}(32);
+        end
+        
+        % Identify unique frequencies (conditions)
+        [p32_unique_freqs, ~, freq_idx] = unique(temp_p32_freq);
+        
+        % Store labels (useful later for plotting)
+        ERFdata.p32_freq_labels{i_sub, i_TD} = p32_unique_freqs;
+        
+        % Initialize indexing structure
+        for i_freq = 1:length(p32_unique_freqs)
+            
+            % Find trials belonging to this frequency
+            ERFdata.Index_p32{i_sub, i_TD}{i_freq} = find(freq_idx == i_freq);
+            
+            % Store number of trials per frequency
+            ERFdata.NumTrialsper_p32(i_sub, i_TD, i_freq) = ...
+                length(ERFdata.Index_p32{i_sub, i_TD}{i_freq});
+        end
+        
+        %% 1.9 Make p32-evoked
+        nElec = size(ERFdata.p32{i_sub,i_TD},1);
+        nSamples = size(ERFdata.p32{i_sub,i_TD},2);
+        nTrials = size(ERFdata.p32{i_sub,i_TD},3);
+
+        % Initialize p32evoked
+        ERFdata.p32evoked{i_sub,i_TD} = zeros(nElec, nSamples, nTrials);
+        baseline_ms = 50;
+        
+        % Loop over trials
+        SampleFreq      = DataClean_AllTrials.fsample;
+        for i_trial = 1:nTrials
+            % Loop over electrodes
+            for i_elec = 1:nElec
+                % Extract p32 data
+                p32_data = squeeze(ERFdata.p32{i_sub,i_TD}(i_elec,:,i_trial));
+
+                % Extract p31 data (tone before p32)
+                p31_data = squeeze(ERFdata.p31{i_sub,i_TD}(i_elec,:,i_trial));
+
+                % Determine number of samples corresponding to last 50 ms
+                nSamplesBL = round(baseline_ms/1000 * SampleFreq);
+                baseline_vals = p31_data(end-nSamplesBL+1:end);
+
+                % Compute mean baseline
+                baseline_mean = mean(baseline_vals);
+
+                % Subtract baseline from p32
+                ERFdata.p32evoked{i_sub,i_TD}(i_elec,:,i_trial) = p32_data - baseline_mean;
+            end
+        end
+        
+        %% 1.10 Sensory tracking (pitch → neural regression in 50 ms windows)
+        % --- Parameters ---
+%         win_ms = 50;
+%         win_samples = round(win_ms/1000 * SampleFreq);
+%         
+%         data = ERFdata.p1p33{i_sub,i_TD}; % (elec × time × trial)
+%         
+%         nElec   = size(data,1);
+%         nTrials = size(data,3);
+%         
+%         nTones = 32;
+%         
+%         % --- Extract pitch for all tones ---
+%         pitch_alltones = nan(nTrials, nTones);
+%         
+%         for i_trial = 1:nTrials
+%             seq = temp_DataClean_CleanTrialsElecs.behav.stim.series_f{i_trial};
+%             pitch_alltones(i_trial,:) = seq(1:nTones);
+%         end
+%         
+%         % --- Initialize ---
+%         if i_TD == 1
+%             maxWins = 4;
+%         else 
+%             maxWins = 8;
+%         end
+%         
+%         ERFdata.pitch_beta_pooled{i_sub,i_TD} = nan(nElec, maxWins);
+% 
+%         for i_elec = 1:nElec
+%             for i_win = 1:maxWins
+%                 neural_all = [];
+%                 pitch_all  = [];
+%                 
+%                 for i_tone = 1:nTones
+%                     % --- Absolute indices ---
+%                     s1_abs = StimTiming.Sample_Tone_StartStop{i_sub,i_TD}(i_tone,1);
+%                     s2_abs = StimTiming.Sample_Tone_StartStop{i_sub,i_TD}(i_tone,2);
+%                     
+%                     % --- Convert to relative indices ---
+%                     s1 = s1_abs - StimTiming.Sample_Tone_StartStop{i_sub,i_TD}(1,1) + 1;
+%                     s2 = s2_abs - StimTiming.Sample_Tone_StartStop{i_sub,i_TD}(1,1) + 1;
+%                     
+%                     % --- Define windows within this tone ---
+%                     win_edges = round(linspace(s1, s2+1, maxWins+1));
+%                     
+%                     idx_start = win_edges(i_win);
+%                     idx_end   = win_edges(i_win+1) - 1;
+%                     
+%                     % --- Neural data (trials × 1) ---
+%                     temp   = squeeze(data(i_elec, idx_start:idx_end, :)); % samples × trials
+%                     neural = squeeze(mean(temp,1)); % trials
+%                     
+%                     % --- Pitch (trials × 1) ---
+%                     pitch = pitch_alltones(:,i_tone);
+%                     
+%                     % --- Stack across tones ---
+%                     neural_all = [neural_all; neural(:)];
+%                     pitch_all  = [pitch_all; pitch(:)];
+%                 end
+%                 
+%                 valid_idx = ~isnan(neural_all) & ~isnan(pitch_all);
+%                 
+%                 if sum(valid_idx) < 20
+%                     continue
+%                 end
+%                 
+%                 x = pitch_all(valid_idx);
+%                 y = neural_all(valid_idx);
+%                 
+%                 % --- z-score pitch ---
+%                 if std(x) == 0
+%                     continue
+%                 end
+%                 x = (x - mean(x)) ./ std(x);
+%                 
+%                 % --- Regression ---
+%                 X = [ones(length(x),1) x];
+%                 b = X \ y;
+%                 
+%                 % --- Store slope ---
+%                 ERFdata.pitch_beta_pooled{i_sub,i_TD}(i_elec,i_win) = b(2);
+%                 
+%             end
+%         end
+%         
+%         clear temp*
+%     
+%         %% Permutation to assess significance of regression betas
+%         nPerm = 1000;
+% 
+%         beta_real = ERFdata.pitch_beta_pooled{i_sub,i_TD}; % elec × win
+% 
+%         [nElec, nWins] = size(beta_real);
+% 
+%         ERFdata.pitch_beta_perm{i_sub,i_TD} = nan(nElec, nWins, nPerm);
+%         ERFdata.pitch_pval_perm{i_sub,i_TD} = nan(nElec, nWins);
+% 
+%         for i_elec = 1:nElec
+%             for i_win = 1:nWins
+%                 % =========================
+%                 % BUILD REAL DATA (reuse logic)
+%                 % =========================
+%                 neural_all = [];
+%                 pitch_all  = [];
+% 
+%                 for i_tone = 1:nTones
+% 
+%                     s1_abs = StimTiming.Sample_Tone_StartStop{i_sub,i_TD}(i_tone,1);
+%                     s2_abs = StimTiming.Sample_Tone_StartStop{i_sub,i_TD}(i_tone,2);
+% 
+%                     s1 = s1_abs - StimTiming.Sample_Tone_StartStop{i_sub,i_TD}(1,1) + 1;
+%                     s2 = s2_abs - StimTiming.Sample_Tone_StartStop{i_sub,i_TD}(1,1) + 1;
+% 
+%                     win_edges = round(linspace(s1, s2+1, nWins+1));
+% 
+%                     idx_start = win_edges(i_win);
+%                     idx_end   = win_edges(i_win+1)-1;
+% 
+%                     temp   = squeeze(data(i_elec, idx_start:idx_end, :));
+%                     neural = squeeze(mean(temp,1)); % trials
+% 
+%                     pitch = pitch_alltones(:,i_tone);
+% 
+%                     neural_all = [neural_all; neural(:)];
+%                     pitch_all  = [pitch_all; pitch(:)];
+%                 end
+% 
+%                 valid_idx = ~isnan(neural_all) & ~isnan(pitch_all);
+% 
+%                 if sum(valid_idx) < 20
+%                     continue
+%                 end
+% 
+%                 y = neural_all(valid_idx);
+%                 x = pitch_all(valid_idx);
+% 
+%                 % z-score
+%                 if std(x) == 0
+%                     continue
+%                 end
+%                 x = (x - mean(x)) ./ std(x);
+% 
+%                 X = [ones(length(x),1) x];
+%                 b_real = X \ y;
+%                 b_real = b_real(2);
+% 
+%                 % =========================
+%                 % PERMUTATIONS
+%                 % =========================
+%                 beta_perm = nan(nPerm,1);
+% 
+%                 for perm = 1:nPerm
+%                     pitch_perm_all = [];
+%                     % shuffle WITHIN each trial
+%                     for i_trial = 1:nTrials
+%                         pitch_perm_all = [pitch_perm_all; ...
+%                             pitch_alltones(i_trial, randperm(nTones))'];
+%                     end
+% 
+%                     % match neural vector length
+%                     x_perm = pitch_perm_all(valid_idx);
+% 
+%                     % z-score
+%                     if std(x_perm) == 0
+%                         continue
+%                     end
+%                     x_perm = (x_perm - mean(x_perm)) ./ std(x_perm);
+% 
+%                     % regression
+%                     Xp = [ones(length(x_perm),1) x_perm];
+%                     b_perm = Xp \ y;
+% 
+%                     beta_perm(perm) = b_perm(2);
+%                 end
+% 
+%                 % =========================
+%                 % P-VALUE
+%                 % =========================
+%                 pval = mean(abs(beta_perm) >= abs(b_real));
+% 
+%                 ERFdata.pitch_pval_perm{i_sub,i_TD}(i_elec,i_win) = pval;
+%                 ERFdata.pitch_beta_perm{i_sub,i_TD}(i_elec,i_win,:) = beta_perm;
+% 
+%             end
+%         end
+%     
+%         %% FDR correction across electrodes within time windows
+%     
+%         % skip empty entries
+%         if isempty(ERFdata.pitch_pval_perm{i_sub,i_TD})
+%             continue
+%         end
+%         
+%         pval_mat = ERFdata.pitch_pval_perm{i_sub,i_TD}; % elec × win
+%         [nElec, nWins] = size(pval_mat);
+%         
+%         sig_fdr = nan(nElec, nWins);
+%         
+%         % =========================
+%         % LOOP WINDOWS
+%         % =========================
+%         for i_win = 1:nWins
+%             
+%             pvals = pval_mat(:,i_win);
+%             
+%             % valid electrodes
+%             valid_idx = ~isnan(pvals);
+%             
+%             if sum(valid_idx) < 5
+%                 continue
+%             end
+%             
+%             % --- FDR across electrodes ---
+%             [h, ~, qvals] = fdr_bh(pvals(valid_idx), 0.05);
+%             
+%             % reconstruct full vector
+%             temp_fdr = nan(nElec,1);
+%             temp_fdr(valid_idx) = h;
+%             
+%             sig_fdr(:,i_win) = temp_fdr;
+%         end
+%         
+%         % =========================
+%         % STORE
+%         % =========================
+%         ERFdata.pitch_sig_fdr{i_sub,i_TD} = sig_fdr;
+        
+
+       %% =========================================
+       % 1.11 P1 REGRESSION (sample-wise, FAST)
+       % =========================================
+       
+       Data_p1 = ERFdata.p1p33{i_sub,i_TD}; % elec × time × trial
+       
+       [nSensors, nSamples, nTrials] = size(Data_p1);
+       
+       % --- Extract pitch of p1 ---
+       pitch_p1 = nan(nTrials,1);
+       for i_trial = 1:nTrials
+           seq = temp_DataClean_CleanTrialsElecs.behav.stim.series_f{i_trial};
+           pitch_p1(i_trial) = seq(1);
+       end
+       
+       % --- z-score pitch ---
+       pitch_p1 = (pitch_p1 - nanmean(pitch_p1)) ./ nanstd(pitch_p1);
+       
+       % --- Design matrix ---
+       X = [ones(nTrials,1), pitch_p1];   % trials × 2
+       XtX_inv = inv(X' * X);             % 2 × 2
+       
+       % --- Parameters ---
+       param.clusteralpha = 0.05;
+       param.numreps      = 1000;
+       
+       % --- Preallocate ---
+       ERFdata.P1Regression{i_sub,i_TD}.tval  = cell(nSensors,1);
+       ERFdata.P1Regression{i_sub,i_TD}.pval  = cell(nSensors,1);
+       ERFdata.P1Regression{i_sub,i_TD}.beta  = cell(nSensors,1);
+       ERFdata.P1Regression{i_sub,i_TD}.clusterstat = cell(nSensors,1);
+       
+       ERFdata.P1Regression{i_sub,i_TD}.ClusterMaxStat_shuff = cell(nSensors,1);
+       
+       %% =========================================
+       % REAL DATA
+       % =========================================
+       
+       for i_elec = 1:nSensors
+           
+           % --- Get all samples at once ---
+           Y = squeeze(Data_p1(i_elec,:,:)); % samples × trials
+           Y = Y'; % trials × samples
+           
+           % --- Regression (vectorized across samples) ---
+           B = XtX_inv * (X' * Y); % 2 × samples
+           
+           Y_hat = X * B;
+           res   = Y - Y_hat;
+           
+           s2 = sum(res.^2) / (nTrials - 2); % 1 × samples
+           se = sqrt(s2 * XtX_inv(2,2));
+           
+           tvals = B(2,:) ./ se;
+           
+           % --- p-values (two-tailed) ---
+           pvals = 2 * (1 - tcdf(abs(tvals), nTrials - 2));
+           
+           % --- Store ---
+           ERFdata.P1Regression{i_sub,i_TD}.tval{i_elec} = tvals;
+           ERFdata.P1Regression{i_sub,i_TD}.pval{i_elec} = pvals;
+           ERFdata.P1Regression{i_sub,i_TD}.beta{i_elec} = B(2,:);
+           
+           % --- CLUSTERING ---
+           ERFdata.P1Regression{i_sub,i_TD}.clusterstat{i_elec} = ...
+               find_temporal_clusters(tvals, pvals, param.clusteralpha);
+           
+           % --- Preallocate shuffle max stat ---
+           ERFdata.P1Regression{i_sub,i_TD}.ClusterMaxStat_shuff{i_elec} = nan(param.numreps,1);
+       end
+       
+       %% =========================================
+       % PERMUTATION TEST (FAST)
+       % =========================================
+       tic
+       for i_rep = 1:param.numreps
+           
+           ind_shuff = randperm(nTrials);
+           
+           % --- Shuffle once ---
+           Data_shuff = Data_p1(:,:,ind_shuff);
+           
+           for i_elec = 1:nSensors
+               
+               % --- All samples at once ---
+               Y = squeeze(Data_shuff(i_elec,:,:)); % samples × trials
+               Y = Y'; % trials × samples
+               
+               % --- Regression ---
+               B = XtX_inv * (X' * Y);
+               
+               Y_hat = X * B;
+               res   = Y - Y_hat;
+               
+               s2 = sum(res.^2) / (nTrials - 2);
+               se = sqrt(s2 * XtX_inv(2,2));
+               
+               tvals_shuff = B(2,:) ./ se;
+               
+               % --- p-values ---
+               pvals_shuff = 2 * (1 - tcdf(abs(tvals_shuff), nTrials - 2));
+               
+               % --- CLUSTERING ---
+               cluster_shuff = find_temporal_clusters( ...
+                   tvals_shuff, pvals_shuff, param.clusteralpha);
+               
+               % --- Store only what you NEED ---
+               ERFdata.P1Regression{i_sub,i_TD}.ClusterMaxStat_shuff{i_elec}(i_rep) = ...
+                   cluster_shuff.maxStatSumAbs;
+           end
+           
+           
+       end
+       toc
+       disp(num2str(toc))
+       %% =========================================
+       % CLUSTER-LEVEL P-VALUES (per electrode)
+       % =========================================
+       
+       nElec = nSensors;
+       
+       cluster_pvals = nan(nElec,1);
+       
+       for i_elec = 1:nElec
+           
+           real_cluster = ERFdata.P1Regression{i_sub,i_TD}.clusterstat{i_elec};
+           
+           % --- If no clusters → p = 1 ---
+           if isempty(real_cluster) || real_cluster.nClusters == 0
+               cluster_pvals(i_elec) = 1;
+               continue
+           end
+           
+           real_stat = real_cluster.maxStatSumAbs;
+           
+           null_dist = ERFdata.P1Regression{i_sub,i_TD}.ClusterMaxStat_shuff{i_elec};
+           null_dist = null_dist(~isnan(null_dist));
+           
+           if isempty(null_dist)
+               cluster_pvals(i_elec) = NaN;
+               continue
+           end
+           
+           % --- cluster permutation p-value ---
+           cluster_pvals(i_elec) = ...
+               (sum(null_dist >= real_stat) + 1) / (length(null_dist) + 1);
+       end
+       
+       % --- Store ---
+       ERFdata.P1Regression{i_sub,i_TD}.cluster_pval = cluster_pvals;
+       
+       %% =========================================
+       % FDR CORRECTION ACROSS ELECTRODES
+       % =========================================
+       
+       pvals = ERFdata.P1Regression{i_sub,i_TD}.cluster_pval;
+       
+       valid_idx = ~isnan(pvals);
+       
+       if sum(valid_idx) > 0
+           
+           [h, ~, qvals] = fdr_bh(pvals(valid_idx), 0.05);
+           
+           % --- reconstruct full vectors ---
+           sig_fdr = false(nElec,1);
+           q_full  = nan(nElec,1);
+           
+           sig_fdr(valid_idx) = h;
+           q_full(valid_idx)  = qvals;
+           
+       else
+           sig_fdr = nan(nElec,1);
+           q_full  = nan(nElec,1);
+       end
+       
+       % --- Store ---
+       ERFdata.P1Regression{i_sub,i_TD}.sig_fdr = sig_fdr;
+       ERFdata.P1Regression{i_sub,i_TD}.qvals   = q_full;
     end
-    
+
     %1.8 Cleanup
     clear DataClean_AllTrials loadfile_ECoGpreprocdata
     
 end
 disp(['-- Preparing pre-processed data for all subjects finished after: ' ...
     num2str(round(toc/60,2)) 'min --']) %About 20 min for n = 9 per TD
+
+%save(['ERFdata_' FuncInput_DataType '_pitchregression.mat'], 'ERFdata', '-v7.3');
+save(['ERFdata_' FuncInput_DataType '_pitchregression_P1.mat'], 'ERFdata', '-v7.3');
+
+%ERFdata=load(['ERFdata_' FuncInput_DataType '_pitchregression.mat']);
+ERFdata=load(['ERFdata_' FuncInput_DataType '_pitchregression_P1.mat']);
+ERFdata = ERFdata.ERFdata;
+
+%% Identify significant electrodes for pitch regression (with at least 1 significant window)
+% Loop over subjects and tone durations
+% for i_sub = 1:size(ERFdata.pitch_sig_fdr,1)
+%     for i_TD = 1:size(ERFdata.pitch_sig_fdr,2)
+%         
+%         sig_mat = ERFdata.pitch_sig_fdr{i_sub,i_TD}; % electrodes × windows
+%         [nElec, nWins] = size(sig_mat);
+%         
+%         % Initialize
+%         electrodes_with_sig = [];
+%         sig_windows_per_elec = cell(nElec,1);
+%         
+%         for i_elec = 1:nElec
+%             sig_wins = find(sig_mat(i_elec,:) > 0); % find windows with significance
+%             if ~isempty(sig_wins)
+%                 electrodes_with_sig(end+1) = i_elec; %#ok<AGROW>
+%                 sig_windows_per_elec{i_elec} = sig_wins;
+%             end
+%         end
+%         
+%         % Display results
+%         fprintf('Subject %d, TD %d:\n', i_sub, i_TD);
+%         if isempty(electrodes_with_sig)
+%             fprintf('  No electrodes with significant windows.\n');
+%         else
+%             for i = 1:length(electrodes_with_sig)
+%                 elec = electrodes_with_sig(i);
+%                 fprintf('  Electrode %d: significant windows = %s\n', elec, mat2str(sig_windows_per_elec{elec}));
+%             end
+%         end
+%         fprintf('\n');
+%     end
+% end
+
+%% FDR correction across time windows
+% for i_sub = 1:length(subs)
+%     for i_TD = 1:length(FuncInput_ToneDur_text)
+% 
+%         pval_mat = ERFdata.pitch_pval_perm{i_sub,i_TD}; % elec × win
+%         
+%         if isempty(pval_mat)
+%             continue
+%         end
+%         
+%         [nElec, nWins] = size(pval_mat);
+%         
+%         % =========================
+%         % FLATTEN
+%         % =========================
+%         pvals_vec = pval_mat(:);   % (nElec*nWins) × 1
+%         
+%         valid_idx = ~isnan(pvals_vec);
+%         
+%         % =========================
+%         % FDR across ALL tests
+%         % =========================
+%         [h, ~, qvals] = fdr_bh(pvals_vec(valid_idx), 0.05);
+%         
+%         % reconstruct full vectors
+%         sig_vec = nan(size(pvals_vec));
+%         qval_vec = nan(size(pvals_vec));
+%         
+%         sig_vec(valid_idx)  = h;
+%         qval_vec(valid_idx) = qvals;
+%         
+%         % =========================
+%         % RESHAPE BACK
+%         % =========================
+%         sig_fdr_all = reshape(sig_vec, [nElec, nWins]);
+%         qvals_all   = reshape(qval_vec, [nElec, nWins]);
+%         
+%         % =========================
+%         % STORE
+%         % =========================
+%         ERFdata.pitch_sig_fdr_all{i_sub,i_TD} = sig_fdr_all;
+%         ERFdata.pitch_qvals_all{i_sub,i_TD}   = qvals_all;
+% 
+%     end
+% end
+
+%% Aggregate pvals across subjects for full pitch sequence regression
+% PitchRegResults = struct('sig_fdr', [], 'pval', [], 'pval_fdr', [], 'pval_fdr_derivative', []);
+% for i_sub = 1:length(subs)
+%     for i_TD = 1:length(FuncInput_ToneDur_text)
+%         sig_mat = ERFdata.pitch_sig_fdr{i_sub,i_TD}; % elec × win
+%         pvals = ERFdata.pitch_pval_perm{i_sub,i_TD};
+%         pvals_masked = pvals;
+%         pvals_masked(sig_mat == 0) = NaN;
+%         pvals_deriv = -(log10(pvals_masked));
+%         
+%         nElec = size(sig_mat,1);
+%         
+%         % --- Initialize padded matrix ---
+%         sig_mat_8 = nan(nElec, 8);
+%         pvals_8 = nan(nElec, 8);
+%         pvals_masked_8 = nan(nElec, 8);
+%         pvals_deriv_8 = nan(nElec, 8);
+%         
+%         if i_TD == 1
+%             % TD1: only 4 windows → fill first 4
+%             sig_mat_8(:,1:4) = sig_mat;
+%             pvals_8(:,1:4) = pvals;
+%             pvals_masked_8(:,1:4) = pvals_masked;
+%             pvals_deriv_8(:, 1:4) = pvals_deriv; 
+%         else
+%             % TD2: already 8 windows
+%             sig_mat_8 = sig_mat;
+%             pvals_8 = pvals;
+%             pvals_masked_8 = pvals_masked; 
+%             pvals_deriv_8 = pvals_deriv;
+%         end
+%         
+%         if i_sub == 1 && i_TD == 1
+%             PitchRegResults.sig_fdr = sig_mat_8;
+%             PitchRegResults.pval = pvals_8;
+%             PitchRegResults.pval_fdr = pvals_masked_8;
+%             PitchRegResults.pval_fdr_derivative = pvals_deriv_8;
+%         else
+%             PitchRegResults.sig_fdr = [PitchRegResults.sig_fdr; sig_mat_8];
+%             PitchRegResults.pval = [PitchRegResults.pval; pvals_8];
+%             PitchRegResults.pval_fdr = [PitchRegResults.pval_fdr; pvals_masked_8];
+%             PitchRegResults.pval_fdr_derivative = [PitchRegResults.pval_fdr_derivative; pvals_deriv_8];
+%         end
+%     end
+% end
+
+%% Aggregate pvals across subjects for full P1 pitch regression
+PitchRegResults = struct();
+PitchRegResults.TD1 = struct('sig_fdr', [], 'pval', [], 'pval_fdr', [], 'pval_fdr_derivative', []);
+PitchRegResults.TD2 = struct('sig_fdr', [], 'pval', [], 'pval_fdr', [], 'pval_fdr_derivative', []);
+
+for i_sub = 1:length(subs)
+    for i_TD = 1:length(FuncInput_ToneDur_text)
+        
+        sig_mat = ERFdata.P1Regression{i_sub,i_TD}.sig_fdr;
+        pvals   = ERFdata.P1Regression{i_sub,i_TD}.cluster_pval;
+        
+        pvals_masked = pvals;
+        pvals_masked(sig_mat == 0) = NaN;
+        pvals_deriv = -log10(pvals);
+        
+        % =========================
+        % PAD TO DOUBLE LENGTH
+        % =========================
+        nElec = length(sig_mat);
+        
+        sig_mat         = [sig_mat; nan(nElec,1)];
+        pvals           = [pvals; nan(nElec,1)];
+        pvals_masked    = [pvals_masked; nan(nElec,1)];
+        pvals_deriv     = [pvals_deriv; nan(nElec,1)];
+        
+        % --- choose TD field ---
+        if i_TD == 1
+            TDfield = 'TD1';
+        else
+            TDfield = 'TD2';
+        end
+        
+        % --- initialize OR append ---
+        if isempty(PitchRegResults.(TDfield).sig_fdr)
+            PitchRegResults.(TDfield).sig_fdr = sig_mat;
+            PitchRegResults.(TDfield).pval    = pvals;
+            PitchRegResults.(TDfield).pval_fdr = pvals_masked;
+            PitchRegResults.(TDfield).pval_fdr_derivative = pvals_deriv;
+        else
+            PitchRegResults.(TDfield).sig_fdr = [PitchRegResults.(TDfield).sig_fdr; sig_mat];
+            PitchRegResults.(TDfield).pval = [PitchRegResults.(TDfield).pval; pvals];
+            PitchRegResults.(TDfield).pval_fdr = [PitchRegResults.(TDfield).pval_fdr; pvals_masked];
+            PitchRegResults.(TDfield).pval_fdr_derivative = [PitchRegResults.(TDfield).pval_fdr_derivative; pvals_deriv];
+        end
+    end
+end
 
 
 %% 2) Load current effect data and aggregate data across subjects
@@ -526,50 +1180,130 @@ for i_sub = 1:length(subs)
     disp(['done loading in ' num2str(toc) ' sec'])
 end
 
-
 %% 4) Determine sign. electrodes
-SignElecs.array         = any(Param2plot.all_subs.pval < param.pval_plotting,2); %1D filter denoting sign. elecs (independent of number of clusters)
-SignElecs.index         = find(SignElecs.array);%1D index array denoting sign. elecs (independent of number of clusters)
-SignElecs.num_elecs     = length(SignElecs.index);
-SignElecs.num_cluster   = sum(sum(Param2plot.all_subs.pval < param.pval_plotting));
+%SignElecs.array         = any(Param2plot.all_subs.pval < param.pval_plotting,2); %1D filter denoting sign. elecs (independent of number of clusters)
+%SignElecs.array         = any(PitchRegResults.pval_fdr < param.pval_plotting,2);
 
-%Determine anatomical parcellations for sign. electrodes
-SignElecs.label_AnatCat = Param2plot.all_subs.label_AnatCat(SignElecs.index);
-SignElecs.index_AnatCat = max(Param2plot.all_subs.index_AnatCat(SignElecs.index,:),[],2);
+for i_TD = 1:2
+    if i_TD == 1
+        TDfield = 'TD1';
+    else
+        TDfield = 'TD2';
+    end
+        
+    SignElecs.array         = PitchRegResults.(TDfield).pval < param.pval_plotting;
+    SignElecs.index         = find(SignElecs.array);%1D index array denoting sign. elecs (independent of number of clusters)
+    SignElecs.num_elecs     = length(SignElecs.index);
+    %SignElecs.num_cluster   = sum(sum(Param2plot.all_subs.pval < param.pval_plotting));
 
-%Determine labels of sign. elecs and add number to subtitle
-SignElecs.labels        = labels_allsub(SignElecs.index);
-SignElecs.anatlabels    = anatlabels_allsub(SignElecs.index);
-SignElecs.fulllabels    = [];
-for i_elec = 1:length(SignElecs.labels)
-    SignElecs.fulllabels{i_elec,1} = ...
-        [SignElecs.labels{i_elec}, ' ', SignElecs.anatlabels{i_elec}];
-end
+    %Determine anatomical parcellations for sign. electrodes
+    SignElecs.label_AnatCat = Param2plot.all_subs.label_AnatCat(SignElecs.index);
+    SignElecs.index_AnatCat = max(Param2plot.all_subs.index_AnatCat(SignElecs.index,:),[],2);
 
-if ~isempty(SignElecs.labels)
-    sign_title = ...
-        [num2str(SignElecs.num_elecs)...
-        ' / ' num2str(length(labels_allsub)) ' sign. elecs']; %1 line
-else
-    sign_title = ...
-        ['0 / ' num2str(length(labels_allsub)) ' sign. elecs']; %1 line
-end
+    %Determine labels of sign. elecs and add number to subtitle
+    SignElecs.labels        = labels_allsub(SignElecs.index);
+    SignElecs.anatlabels    = anatlabels_allsub(SignElecs.index);
+    SignElecs.fulllabels    = [];
+    for i_elec = 1:length(SignElecs.labels)
+        SignElecs.fulllabels{i_elec,1} = ...
+            [SignElecs.labels{i_elec}, ' ', SignElecs.anatlabels{i_elec}];
+    end
 
-%Create electrode labels for plotting
-for i_elec = 1:length(labels_allsub)%No electrode labels
-    labels_plotting_empty{i_elec} = '';
-end
-counter_elecs           = 0;
-labels_plotting_number  = labels_plotting_empty;
-for i_elec = SignElecs.index'
-    counter_elecs = counter_elecs +1;
-    labels_plotting_number{i_elec} = num2str(counter_elecs);
-end
+    if ~isempty(SignElecs.labels)
+        sign_title = ...
+            [num2str(SignElecs.num_elecs)...
+            ' / ' num2str(length(labels_allsub)) ' sign. elecs']; %1 line
+    else
+        sign_title = ...
+            ['0 / ' num2str(length(labels_allsub)) ' sign. elecs']; %1 line
+    end
 
-if ~isempty(SignElecs.index)
+    %Create electrode labels for plotting
+    for i_elec = 1:length(labels_allsub)%No electrode labels
+        labels_plotting_empty{i_elec} = '';
+    end
+    counter_elecs           = 0;
+    labels_plotting_number  = labels_plotting_empty;
+    for i_elec = SignElecs.index'
+        counter_elecs = counter_elecs +1;
+        labels_plotting_number{i_elec} = num2str(counter_elecs);
+    end
+
     %% 5) Plot figure showing surf with sign. elecs and p33 ERFs per p*34 condition
     %Determine number of subplots (surf + 1 subplot per sign. elec)
-    num_subplot = SignElecs.num_elecs + 4;
+    num_subplot = 2;
+    DimSubplot = [ceil(sqrt(num_subplot)), ceil(sqrt(num_subplot))];
+    SubplotPos_Surf = [1 2 DimSubplot(1)+1 DimSubplot(1)+2]; %4 subplots in upper left quadrant
+    SubplotPos_ERF = [3:DimSubplot(1) DimSubplot(1)+3:num_subplot];
+        
+    %Prepare figure
+    h = figure('visible','on'); %ensures figure doesn't pop up during plotting
+    set(gcf,'units','normalized','outerposition',[0 0 1 1]) %full screen
+    set(gcf,'renderer','opengl');
+    
+    %Determine parameter to be plotted and set up plotting struct
+    for i_elec = 1:length(PitchRegResults.(TDfield).pval_fdr_derivative)
+        PlotInput(i_elec,1) = max(PitchRegResults.(TDfield).pval_fdr_derivative(i_elec,:));
+    end
+    
+    %Colorlim
+    clims               = [0 max(PlotInput)];
+    Label_Colorbar      = '- log10 (cluster p-value) ';
+    
+    dat.dimord          = 'chan_time';
+    dat.time            = 0;
+    dat.label           = labels_allsub;
+    dat.avg             = PlotInput;
+    dat.sign_elecs      = SignElecs.array;
+    dat.textcolor_rgb   = [1 0 0];
+    SizeFactor          = 4;
+    
+    chanSize = ones(1,length(dat.avg))*SizeFactor; %electrode size (arbitrary)
+    cmap        = 'parula';
+    
+    SubplotPosition = [0 0 0 0];
+    
+    %Project all electrodes on one hemisphere,
+    coords_allsub(:,1) = abs(coords_allsub(:,1)) * -1;
+    
+    %Plot surface
+    sp_handle_surf_temp = NASTD_ECoG_Plot_SubplotSignElecsSurf_Label_LH...
+        (coords_allsub, labels_plotting_number, dat.avg, SignElecs.array,...
+        chanSize, clims, cmap, dat.textcolor_rgb, ...
+        DimSubplot, [1 2 DimSubplot(1)+1 DimSubplot(1)+2], SubplotPosition, [], []);
+    
+    sp_handle_surf = sp_handle_surf_temp.L;
+    pos = sp_handle_surf.Position;   % [left bottom width height]
+    sp_handle_surf.Position = [pos(1), pos(2)-0.03, pos(3), pos(4)];
+    
+    %Colorbar
+    ColorbarPosition    = [sp_handle_surf.Position(1) sp_handle_surf.Position(2) 1 1];
+    h = colorbar;
+    h.Position(4)       = h.Position(4)*ColorbarPosition(4); %makes colorbar shorter
+    h.Label.String      = Label_Colorbar;
+    h.FontSize          = 12;
+    caxis(clims)
+    
+    h_title = sgtitle({ ...
+    ['Input data: ' FuncInput_DataType], ...
+    [TDfield '; Significant pitch tracking (sample-wise) (' ...
+     num2str(SignElecs.num_elecs) ' / ' num2str(length(labels_allsub)) ' electrodes)'] ...
+    }, ...
+    'FontSize', 16, 'FontWeight', 'bold');
+    
+    if save_poststepFigs == 1
+        filename     = ['Surf1H_P1pitchregression_' TDfield '_SignElec' param.ElecSelect ...
+            '_Allsubn' num2str(length(subs)) '_AllSigwindowperElec_' ...
+             FuncInput_DataType '_AllTD_Stat' FDR_label '.png'];
+        figfile      = [path_fig filename];
+        saveas(gcf, figfile, 'png'); %save png version
+        close all;
+    end
+end
+
+%% Plot electrodes per time window
+for iWin = 1:8
+    num_subplot = 2;
     DimSubplot = [ceil(sqrt(num_subplot)), ceil(sqrt(num_subplot))];
     SubplotPos_Surf = [1 2 DimSubplot(1)+1 DimSubplot(1)+2]; %4 subplots in upper left quadrant
     SubplotPos_ERF = [3:DimSubplot(1) DimSubplot(1)+3:num_subplot];
@@ -579,9 +1313,47 @@ if ~isempty(SignElecs.index)
     set(gcf,'units','normalized','outerposition',[0 0 1 1]) %full screen
     set(gcf,'renderer','opengl');
     
+    SignElecs.array         = any(PitchRegResults.pval_fdr(:,iWin) < param.pval_plotting,2);
+    SignElecs.index         = find(SignElecs.array);%1D index array denoting sign. elecs (independent of number of clusters)
+    SignElecs.num_elecs     = length(SignElecs.index);
+    SignElecs.num_cluster   = sum(sum(Param2plot.all_subs.pval < param.pval_plotting));
+
+    %Determine anatomical parcellations for sign. electrodes
+    SignElecs.label_AnatCat = Param2plot.all_subs.label_AnatCat(SignElecs.index);
+    SignElecs.index_AnatCat = max(Param2plot.all_subs.index_AnatCat(SignElecs.index,:),[],2);
+
+    %Determine labels of sign. elecs and add number to subtitle
+    SignElecs.labels        = labels_allsub(SignElecs.index);
+    SignElecs.anatlabels    = anatlabels_allsub(SignElecs.index);
+    SignElecs.fulllabels    = [];
+    for i_elec = 1:length(SignElecs.labels)
+        SignElecs.fulllabels{i_elec,1} = ...
+            [SignElecs.labels{i_elec}, ' ', SignElecs.anatlabels{i_elec}];
+    end
+
+    if ~isempty(SignElecs.labels)
+        sign_title = ...
+            [num2str(SignElecs.num_elecs)...
+            ' / ' num2str(length(labels_allsub)) ' sign. elecs']; %1 line
+    else
+        sign_title = ...
+            ['0 / ' num2str(length(labels_allsub)) ' sign. elecs']; %1 line
+    end
+
+    %Create electrode labels for plotting
+    for i_elec = 1:length(labels_allsub)%No electrode labels
+        labels_plotting_empty{i_elec} = '';
+    end
+    counter_elecs           = 0;
+    labels_plotting_number  = labels_plotting_empty;
+    for i_elec = SignElecs.index'
+        counter_elecs = counter_elecs +1;
+        labels_plotting_number{i_elec} = num2str(counter_elecs);
+    end
+    
     %Determine parameter to be plotted and set up plotting struct
-    for i_elec = 1:length(Param2plot.all_subs.pval_derivative)
-        PlotInput(i_elec,1) = max(Param2plot.all_subs.pval_derivative(i_elec,:));
+    for i_elec = 1:length(PitchRegResults.pval_fdr_derivative)
+        PlotInput(i_elec,1) = PitchRegResults.pval_fdr_derivative(i_elec,iWin);
     end
     
     %Colorlim
@@ -611,448 +1383,24 @@ if ~isempty(SignElecs.index)
         DimSubplot, [1 2 DimSubplot(1)+1 DimSubplot(1)+2], SubplotPosition, [], []);
     
     sp_handle_surf = sp_handle_surf_temp.L;
+    pos = sp_handle_surf.Position;   % [left bottom width height]
+    sp_handle_surf.Position = [pos(1), pos(2)-0.03, pos(3), pos(4)];
     
-    %Colorbar
-    ColorbarPosition    = [sp_handle_surf.Position(1) sp_handle_surf.Position(2) 1 1];
-    h = colorbar;
-    h.Position(4)       = h.Position(4)*ColorbarPosition(4); %makes colorbar shorter
-    h.Label.String      = Label_Colorbar;
-    h.FontSize          = 12;
-    caxis(clims)
+    title(['Window ' num2str(iWin) ', ' num2str(SignElecs.num_elecs) ' sig elecs'], ...
+        'FontSize', 12);
     
-    %Plot ERFs for each sign. electrode
-    %Order sign. elecs based on anatomical parcellation
-    [~, index_anatorder] = sort(SignElecs.index_AnatCat);
-    subplot_counter = 0;
-    for i_signelec = index_anatorder'
-        subplot_counter = subplot_counter + 1;
-        
-        %Determine information for current electrode
-        ind_curr_sub                = Param2plot.all_subs.sub_index(SignElecs.index(i_signelec)); %Sub of current elec
-        ind_curr_TD                 = Param2plot.all_subs.TD_index(SignElecs.index(i_signelec)); %TD of current elec
-        ind_curr_elec_allelecs      = SignElecs.index(i_signelec); %Index of current elec in across-sub elec list
-        ind_curr_elec_currsub  = ... %Index of current elec in current-sub elec list
-            find(strcmp(ERFdata.elec_labels{ind_curr_sub, ind_curr_TD}, ...
-            strtok(SignElecs.labels{i_signelec},' ')));
-        label_curr_elec = SignElecs.labels{i_signelec};
-        
-        %For current electrode, Compute AVG + STD across trials per Predp34 condition
-        for i_Predp34 = 1:length(label_Predp34)
-            temp_ERFdata_perp34 = [];
-            for i_trial = 1:length(ERFdata.Index_Predp34{ind_curr_sub, ind_curr_TD}{i_Predp34})
-                temp_ERFdata_perp34(i_trial,:) = ...
-                    ERFdata.p33{ind_curr_sub, ind_curr_TD}...
-                    (ind_curr_elec_currsub,:,ERFdata.Index_Predp34{ind_curr_sub, ind_curr_TD}{i_Predp34}(i_trial));
-            end
-            Avgp33{i_Predp34} = nanmean(temp_ERFdata_perp34,1);
-            STDp33{i_Predp34} = nanstd(temp_ERFdata_perp34,1,1);
-        end
-        
-        %Determine trace colors
-        plot_param.color = ...
-            {[0, 0.4470, 0.7410, 0.7], ...
-            [0, 0.75, 0.75, 0.7],[0.8500, ...
-            0.3250, 0.0980, 0.7]};
-        
-        %Plot ERF for sign  elecs
-        subplot(DimSubplot(1),DimSubplot(2),SubplotPos_ERF(subplot_counter))
-        
-        plot(1:length(Avgp33{1}(:)),Avgp33{1}(:),...
-            'color',plot_param.color{1},'LineWidth', 2)
-        hold on;
-        plot(1:length(Avgp33{2}(:)),Avgp33{2}(:),...
-            'color',plot_param.color{2},'LineWidth', 2)
-        hold on;
-        plot(1:length(Avgp33{3}(:)),Avgp33{3}(:),...
-            'color',plot_param.color{3},'LineWidth', 2)
-        axis tight
-        
-        %Change x-axis labeling to time [s]
-        temp_xticks = xticks;
-        temp_text = {};
-        for i_xtick = 1:length(temp_xticks)
-            temp_text = [temp_text num2str(round(temp_xticks(i_xtick)/SampleFreq,2))];
-        end
-        xticklabels(temp_text)
-        xlabel('p33 [s]')
-        
-        %Highlight sign. samples/clusters
-        grey  = [100 100 100]./255;
-        maxY = max([max(Avgp33{1}(:)), max(Avgp33{2}(:)), max(Avgp33{3}(:))]);
-        minY = min([min(Avgp33{1}(:)), min(Avgp33{2}(:)), min(Avgp33{3}(:))]);
-        
-        sign_samples = Param2plot.per_sub.cluster_timecourse{ind_curr_sub, ind_curr_TD}(ind_curr_elec_currsub,:) > 0;
-        area(1:length(sign_samples), ...
-            sign_samples * ...
-            (max([minY maxY])+abs(max([minY maxY])*0.05)),...
-            'basevalue',0,'FaceColor',grey,'FaceAlpha', 0.3, 'LineStyle','none');
-        if min([minY maxY]) < 0
-            area(1:length(sign_samples), ...
-                sign_samples * ...
-                (min([minY maxY])-abs(min([minY maxY])*0.05)),...
-                'basevalue',0,'FaceColor',grey,'FaceAlpha', 0.3, 'LineStyle','none');
-        end
-        
-        %Add cluster pval as text to shading
-        for i_cluster = 1:sum(~isnan(...
-                Param2plot.per_sub.pval{ind_curr_sub, ind_curr_TD}(ind_curr_elec_currsub,:)))
-            if Param2plot.per_sub.pval{ind_curr_sub, ind_curr_TD}(ind_curr_elec_currsub,i_cluster) ...
-                    < param.pval_plotting
-                shading_startsample = ...
-                    find(Param2plot.per_sub.cluster_timecourse{ind_curr_sub, ind_curr_TD}...
-                    (ind_curr_elec_currsub,:) == i_cluster);
-                text(shading_startsample(1),max([minY maxY] * 0.8), ...
-                    [' p = ' num2str(round(...
-                    Param2plot.per_sub.pval{ind_curr_sub, ind_curr_TD}...
-                    (ind_curr_elec_currsub, i_cluster),3))], ...
-                    'FontSize',8);
-            end
-        end
-        
-        %Scale y-axis to show sign. text if present
-        ylim([min([minY maxY])-+abs(max([minY maxY])*0.05) ...
-            max([minY maxY])+abs(max([minY maxY])*0.05)]); %With space for sign. info
-        
-        %subplot title
-        title([labels_plotting_number{SignElecs.index(i_signelec)} ' ' ...
-            AnatReg_allSubs{2}.CatLabels{SignElecs.index_AnatCat(i_signelec)} ' ' ...
-            label_curr_elec ' ' FuncInput_ToneDur_text{ind_curr_TD} 's TD'],'FontSize',8,'Interpreter','none')
-        
-    end
-    
-    %Adjust figureheader/title
-    switch FuncInput_EffectType
-        case 'PredEffect'
-            effect_text = ['Effect: Prediction (explain p33 activity by p*34);' ...
-                ' p < ' num2str(param.pval_plotting) ' ' FDR_label];
-        case 'SimplePredErrEffect'
-            effect_text = ['Effect: Simple Prediction error' ...
-                ' (explain p34 activity by absolute p33-p34 difference); p < ' ...
-                num2str(param.pval_plotting) ' ' FDR_label];
-        case 'ComplexPredErrEffect'
-            effect_text = ['Effect: Complex Prediction error' ...
-                ' (explain p34 activity by absolute p*34-p34 difference); p < ' ...
-                num2str(param.pval_plotting) ' ' FDR_label];
-    end
-    
-    Fig_title = {['Group level (n = ' num2str(length(subs)) ') - ' effect_text] ...
-        ['Input data: ' FuncInput_DataType ', Pooled TD - Output: ' ...
-        num2str(SignElecs.num_elecs) ' sign. elecs, ' num2str(SignElecs.num_cluster) ' sign. cluster']} ;
-    sgtitle(Fig_title,'FontSize',18,'Interpreter','none')
+    h_title = sgtitle({ ...
+    ['Input data: ' FuncInput_DataType], ...
+    ['Significant pitch tracking'] ...
+    }, ...
+    'FontSize', 16, 'FontWeight', 'bold');
     
     if save_poststepFigs == 1
-        filename     = ['Surf1HERFp33_SignElec' param.ElecSelect ...
-            '_Allsubn' num2str(length(subs)) '_' ...
-            FuncInput_EffectType '_' FuncInput_DataType ...
-            '_AllTD_Stat' FDR_label '.png'];
+        filename     = ['Surf1H_pitchregression_SignElec' param.ElecSelect ...
+            '_Allsubn' num2str(length(subs)) '_Window_n_' num2str(iWin) '_'...
+             FuncInput_DataType '_AllTD_Stat' FDR_label '.png'];
         figfile      = [path_fig filename];
         saveas(gcf, figfile, 'png'); %save png version
         close all;
     end
-    
-    
-    %% 6) Plot figure showing surf with sign. elecs and p1-p33 ERFs per p*34 condition
-    %Determine number of subplots (surf + 1 subplot per sign. elec)
-    num_subplot = SignElecs.num_elecs + 4;
-    DimSubplot = [ceil(sqrt(num_subplot)), ceil(sqrt(num_subplot))];
-    SubplotPos_Surf = [1 2 DimSubplot(1)+1 DimSubplot(1)+2]; %4 subplots in upper left quadrant
-    SubplotPos_ERF = [3:DimSubplot(1) DimSubplot(1)+3:num_subplot];
-    
-    %Prepare figure
-    h = figure('visible','off'); %ensures figure doesn't pop up during plotting
-    set(gcf,'units','normalized','outerposition',[0 0 1 1]) %full screen
-    set(gcf,'renderer','opengl');
-    
-    %Determine parameter to be plotted and set up plotting struct
-    for i_elec = 1:length(Param2plot.all_subs.pval_derivative)
-        PlotInput(i_elec,1) = max(Param2plot.all_subs.pval_derivative(i_elec,:));
-    end
-    
-    %Colorlim
-    clims               = [0 max(PlotInput)];
-    Label_Colorbar      = '- log10 (cluster p-value) ';
-    
-    dat.dimord          = 'chan_time';
-    dat.time            = 0;
-    dat.label           = labels_allsub;
-    dat.avg             = PlotInput;
-    dat.sign_elecs      = SignElecs.array;
-    dat.textcolor_rgb   = [1 0 0];
-    SizeFactor          = 4;
-    
-    chanSize = ones(1,length(dat.avg))*SizeFactor; %electrode size (arbitrary)
-    cmap        = 'parula';
-    
-    SubplotPosition = [0 0 0 0];
-    
-    %Project all electrodes on one hemisphere,
-    coords_allsub(:,1) = abs(coords_allsub(:,1)) * -1;
-    
-    %Plot surface
-    sp_handle_surf_temp = NASTD_ECoG_Plot_SubplotSignElecsSurf_Label_LH...
-        (coords_allsub, labels_plotting_number, dat.avg, SignElecs.array,...
-        chanSize, clims, cmap, dat.textcolor_rgb, ...
-        DimSubplot, [1 2 DimSubplot(1)+1 DimSubplot(1)+2], SubplotPosition, [], []);
-    
-    sp_handle_surf = sp_handle_surf_temp.L;
-    
-    %Colorbar
-    ColorbarPosition    = [sp_handle_surf.Position(1) sp_handle_surf.Position(2) 1 1];
-    h = colorbar;
-    h.Position(4)       = h.Position(4)*ColorbarPosition(4); %makes colorbar shorter
-    h.Label.String      = Label_Colorbar;
-    h.FontSize          = 12;
-    caxis(clims)
-    
-    %Plot ERFs for each sign. electrode
-    %Order sign. elecs based on anatomical parcellation
-    [~, index_anatorder] = sort(SignElecs.index_AnatCat);
-    subplot_counter = 0;
-    for i_signelec = index_anatorder'
-        subplot_counter = subplot_counter + 1;
-        
-        %Determine information for current electrode
-        ind_curr_sub                = Param2plot.all_subs.sub_index(SignElecs.index(i_signelec)); %Sub of current elec
-        ind_curr_TD                 = Param2plot.all_subs.TD_index(SignElecs.index(i_signelec)); %TD of current elec
-        ind_curr_elec_allelecs      = SignElecs.index(i_signelec); %Index of current elec in across-sub elec list
-        ind_curr_elec_currsub  = ... %Index of current elec in current-sub elec list
-            find(strcmp(ERFdata.elec_labels{ind_curr_sub, ind_curr_TD}, ...
-            strtok(SignElecs.labels{i_signelec},' ')));
-        label_curr_elec = SignElecs.labels{i_signelec};
-        
-        %For current electrode, Compute AVG + STD across trials per Predp34 condition
-        for i_Predp34 = 1:length(label_Predp34)
-            temp_ERFdata_perp34 = [];
-            for i_trial = 1:length(ERFdata.Index_Predp34{ind_curr_sub, ind_curr_TD}{i_Predp34})
-                temp_ERFdata_perp34(i_trial,:) = ...
-                    ERFdata.p1p33{ind_curr_sub, ind_curr_TD}...
-                    (ind_curr_elec_currsub,:,ERFdata.Index_Predp34{ind_curr_sub, ind_curr_TD}{i_Predp34}(i_trial));
-            end
-            Avgp1p33{i_Predp34} = nanmean(temp_ERFdata_perp34,1);
-            STDp1p33{i_Predp34} = nanstd(temp_ERFdata_perp34,1,1);
-        end
-        
-        %Determine trace colors
-        plot_param.color = ...
-            {[0, 0.4470, 0.7410, 0.7], ...
-            [0, 0.75, 0.75, 0.7],[0.8500, ...
-            0.3250, 0.0980, 0.7]};
-        
-        %Plot ERF for sign  elecs
-        subplot(DimSubplot(1),DimSubplot(2),SubplotPos_ERF(subplot_counter))
-        
-        plot(1:length(Avgp1p33{1}(:)),Avgp1p33{1}(:),...
-            'color',plot_param.color{1},'LineWidth', 2)
-        hold on;
-        plot(1:length(Avgp1p33{2}(:)),Avgp1p33{2}(:),...
-            'color',plot_param.color{2},'LineWidth', 2)
-        hold on;
-        plot(1:length(Avgp1p33{3}(:)),Avgp1p33{3}(:),...
-            'color',plot_param.color{3},'LineWidth', 2)
-        axis tight
-        
-        %Change x-axis labeling to time [s]
-        temp_xticks = xticks;
-        temp_text = {};
-        for i_xtick = 1:length(temp_xticks)
-            temp_text = [temp_text num2str(round(temp_xticks(i_xtick)/SampleFreq,2))];
-        end
-        xticklabels(temp_text)
-        xlabel('p1-p33 [s]')
-        
-        %Add demarcation lines for tones
-        a = axis;
-        %     for i_tone = 1:size(StimTiming.Sample_Tone_StartStop{ind_curr_sub, ind_curr_TD},1)
-        %         ind_start = StimTiming.Sample_Tone_StartStop{ind_curr_sub, ind_curr_TD}(i_tone, 1) - StimTiming.Sample_Tone_StartStop{ind_curr_sub, ind_curr_TD}(1, 1);
-        %         hold on;
-        %         plot([ind_start ind_start],[a(3) a(4)], 'Color',[0.5 0.5 0.5])
-        %     end
-        for i_tone = [10 20 30 33]
-            ind_start = StimTiming.Sample_Tone_StartStop{ind_curr_sub, ind_curr_TD}(i_tone, 1) - ...
-                StimTiming.Sample_Tone_StartStop{ind_curr_sub, ind_curr_TD}(1, 1);
-            hold on;
-            plot([ind_start ind_start],[a(3) a(4)], 'Color',[0 0 0], 'LineWidth', 1)
-        end
-        
-        %subplot title
-        title([labels_plotting_number{SignElecs.index(i_signelec)} ' ' ...
-            AnatReg_allSubs{2}.CatLabels{SignElecs.index_AnatCat(i_signelec)} ' ' ...
-            label_curr_elec],'FontSize',8,'Interpreter','none')
-        
-    end
-    
-    %Adjust figureheader/title
-    switch FuncInput_EffectType
-        case 'PredEffect'
-            effect_text = ['Effect: Prediction (explain p33 activity by p*34);' ...
-                ' p < ' num2str(param.pval_plotting) ' ' FDR_label];
-        case 'SimplePredErrEffect'
-            effect_text = ['Effect: Simple Prediction error' ...
-                ' (explain p34 activity by absolute p33-p34 difference); p < ' ...
-                num2str(param.pval_plotting) ' ' FDR_label];
-        case 'ComplexPredErrEffect'
-            effect_text = ['Effect: Complex Prediction error' ...
-                ' (explain p34 activity by absolute p*34-p34 difference); p < ' ...
-                num2str(param.pval_plotting) ' ' FDR_label];
-    end
-    
-    Fig_title = {['Group level (n = ' num2str(length(subs)) ') - ' effect_text] ...
-        ['Input data: ' FuncInput_DataType ', Pooled TD - Output: ' ...
-        num2str(SignElecs.num_elecs) ' sign. elecs, ' num2str(SignElecs.num_cluster) ' sign. cluster']} ;
-    sgtitle(Fig_title,'FontSize',18,'Interpreter','none')
-    
-    if save_poststepFigs == 1
-        filename     = ['Surf1HERFp1p33_SignElec' param.ElecSelect ...
-            '_Allsubn' num2str(length(subs)) '_' ...
-            FuncInput_EffectType '_' FuncInput_DataType ...
-            '_AllTD_Stat' FDR_label '.png'];
-        figfile      = [path_fig filename];
-        saveas(gcf, figfile, 'png'); %save png version
-        close all;
-    end
-    
-%     %% 7) Plot figure showing surf with sign. elecs and p34 ERFs per p*34 condition
-%     %Determine number of subplots (surf + 1 subplot per sign. elec)
-%     num_subplot = SignElecs.num_elecs + 4;
-%     DimSubplot = [ceil(sqrt(num_subplot)), ceil(sqrt(num_subplot))];
-%     SubplotPos_Surf = [1 2 DimSubplot(1)+1 DimSubplot(1)+2]; %4 subplots in upper left quadrant
-%     SubplotPos_ERF = [3:DimSubplot(1) DimSubplot(1)+3:num_subplot];
-%     
-%     %Prepare figure
-%     h = figure('visible','on'); %ensures figure doesn't pop up during plotting
-%     set(gcf,'units','normalized','outerposition',[0 0 1 1]) %full screen
-%     set(gcf,'renderer','opengl');
-%     
-%     %Determine parameter to be plotted and set up plotting struct
-%     for i_elec = 1:length(Param2plot.all_subs.pval_derivative)
-%         PlotInput(i_elec,1) = max(Param2plot.all_subs.pval_derivative(i_elec,:));
-%     end
-%     
-%     %Colorlim
-%     clims               = [0 max(PlotInput)];
-%     Label_Colorbar      = '- log10 (cluster p-value) ';
-%     
-%     dat.dimord          = 'chan_time';
-%     dat.time            = 0;
-%     dat.label           = labels_allsub;
-%     dat.avg             = PlotInput;
-%     dat.sign_elecs      = SignElecs.array;
-%     dat.textcolor_rgb   = [1 0 0];
-%     SizeFactor          = 4;
-%     
-%     chanSize = ones(1,length(dat.avg))*SizeFactor; %electrode size (arbitrary)
-%     cmap        = 'parula';
-%     
-%     SubplotPosition = [0 0 0 0];
-%     
-%     %Project all electrodes on one hemisphere,
-%     coords_allsub(:,1) = abs(coords_allsub(:,1)) * -1;
-%     
-%     %Plot surface
-%     sp_handle_surf_temp = NASTD_ECoG_Plot_SubplotSignElecsSurf_Label_LH...
-%         (coords_allsub, labels_plotting_number, dat.avg, SignElecs.array,...
-%         chanSize, clims, cmap, dat.textcolor_rgb, ...
-%         DimSubplot, [1 2 DimSubplot(1)+1 DimSubplot(1)+2], SubplotPosition, [], []);
-%     
-%     sp_handle_surf = sp_handle_surf_temp.L;
-%     
-%     %Colorbar
-%     ColorbarPosition    = [sp_handle_surf.Position(1) sp_handle_surf.Position(2) 1 1];
-%     h = colorbar;
-%     h.Position(4)       = h.Position(4)*ColorbarPosition(4); %makes colorbar shorter
-%     h.Label.String      = Label_Colorbar;
-%     h.FontSize          = 12;
-%     caxis(clims)
-%     
-%     %Plot ERFs for each sign. electrode
-%     %Order sign. elecs based on anatomical parcellation
-%     [~, index_anatorder] = sort(SignElecs.index_AnatCat);
-%     subplot_counter = 0;
-%     for i_signelec = index_anatorder'
-%         subplot_counter = subplot_counter + 1;
-%         
-%         %Determine information for current electrode
-%         ind_curr_sub                = Param2plot.all_subs.sub_index(SignElecs.index(i_signelec)); %Sub of current elec
-%         ind_curr_TD                 = Param2plot.all_subs.TD_index(SignElecs.index(i_signelec)); %TD of current elec
-%         ind_curr_elec_allelecs      = SignElecs.index(i_signelec); %Index of current elec in across-sub elec list
-%         ind_curr_elec_currsub  = ... %Index of current elec in current-sub elec list
-%             find(strcmp(ERFdata.elec_labels{ind_curr_sub, ind_curr_TD}, ...
-%             strtok(SignElecs.labels{i_signelec},' ')));
-%         label_curr_elec = SignElecs.labels{i_signelec};
-%         
-%         %For current electrode, Compute AVG + STD across trials per Predp34 condition
-%         for i_Predp34 = 1:length(label_Predp34)
-%             temp_ERFdata_perp34 = [];
-%             for i_trial = 1:length(ERFdata.Index_Predp34{ind_curr_sub, ind_curr_TD}{i_Predp34})
-%                 temp_ERFdata_perp34(i_trial,:) = ...
-%                     ERFdata.p34{ind_curr_sub, ind_curr_TD}...
-%                     (ind_curr_elec_currsub,:,ERFdata.Index_Predp34{ind_curr_sub, ind_curr_TD}{i_Predp34}(i_trial));
-%             end
-%             Avgp34{i_Predp34} = nanmean(temp_ERFdata_perp34,1);
-%             STDp34{i_Predp34} = nanstd(temp_ERFdata_perp34,1,1);
-%         end
-%         
-%         %Determine trace colors
-%         plot_param.color = ...
-%             {[0, 0.4470, 0.7410, 0.7], ...
-%             [0, 0.75, 0.75, 0.7],[0.8500, ...
-%             0.3250, 0.0980, 0.7]};
-%         
-%         %Plot ERF for sign  elecs
-%         subplot(DimSubplot(1),DimSubplot(2),SubplotPos_ERF(subplot_counter))
-%         
-%         plot(1:length(Avgp34{1}(:)),Avgp34{1}(:),...
-%             'color',plot_param.color{1},'LineWidth', 2)
-%         hold on;
-%         plot(1:length(Avgp34{2}(:)),Avgp34{2}(:),...
-%             'color',plot_param.color{2},'LineWidth', 2)
-%         hold on;
-%         plot(1:length(Avgp34{3}(:)),Avgp34{3}(:),...
-%             'color',plot_param.color{3},'LineWidth', 2)
-%         axis tight
-%         
-%         %Change x-axis labeling to time [s]
-%         temp_xticks = xticks;
-%         temp_text = {};
-%         for i_xtick = 1:length(temp_xticks)
-%             temp_text = [temp_text num2str(round(temp_xticks(i_xtick)/SampleFreq,2))];
-%         end
-%         xticklabels(temp_text)
-%         xlabel('p34 [s]')
-%         
-%         %subplot title
-%         title([labels_plotting_number{SignElecs.index(i_signelec)} ' ' ...
-%             AnatReg_allSubs{2}.CatLabels{SignElecs.index_AnatCat(i_signelec)} ' ' ...
-%             label_curr_elec],'FontSize',8,'Interpreter','none')
-%     end
-%     
-%     %Adjust figureheader/title
-%     switch FuncInput_EffectType
-%         case 'PredEffect'
-%             effect_text = ['Effect: Prediction (explain p33 activity by p*34);' ...
-%                 ' p < ' num2str(param.pval_plotting) ' ' FDR_label];
-%         case 'SimplePredErrEffect'
-%             effect_text = ['Effect: Simple Prediction error' ...
-%                 ' (explain p34 activity by absolute p33-p34 difference); p < ' ...
-%                 num2str(param.pval_plotting) ' ' FDR_label];
-%         case 'ComplexPredErrEffect'
-%             effect_text = ['Effect: Complex Prediction error' ...
-%                 ' (explain p34 activity by absolute p*34-p34 difference); p < ' ...
-%                 num2str(param.pval_plotting) ' ' FDR_label];
-%     end
-%     
-%     Fig_title = {['Group level (n = ' num2str(length(subs)) ') - ' effect_text] ...
-%         ['Input data: ' FuncInput_DataType ', Pooled TD - Output: ' ...
-%         num2str(SignElecs.num_elecs) ' sign. elecs, ' num2str(SignElecs.num_cluster) ' sign. cluster']} ;
-%     sgtitle(Fig_title,'FontSize',18,'Interpreter','none')
-%     
-%     if save_poststepFigs == 1
-%         filename     = ['Surf1HERFp34_SignElec' param.ElecSelect ...
-%             '_Allsubn' num2str(length(subs)) '_' ...
-%             FuncInput_EffectType '_' FuncInput_DataType ...
-%             '_AllTD_Stat' FDR_label '.png'];
-%         figfile      = [path_fig filename];
-%         saveas(gcf, figfile, 'png'); %save png version
-%         close all;
-%     end
 end
