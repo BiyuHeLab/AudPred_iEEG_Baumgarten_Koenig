@@ -1,4 +1,4 @@
-NASTD_iEEG Project overview 
+﻿NASTD_iEEG Project overview 
 
 Project aim: 
     • Show how the human brain processes naturalistic auditory tone sequences using iEEG recordings
@@ -61,7 +61,7 @@ Scripts:
                     ◦ Base script: NASTD_ECoG_HisTrack_Main.m
                     ◦ Subfunctions stored in \Helper Functions\
                 • \Prediction\: Prediction and Prediction error analysis
-                    ◦ Base script: NASTD_ECoG_Predict_Main.m
+                    ◦ Base script: NASTD_ECoG_Predict_Main_lk.m
                     ◦ Subfunctions stored in \Helper Functions\
                 • \StimulusCorrelation\: Stimulus tracking analysis
                     ◦ Base script: NASTD_ECoG_StimCorr_Main.m
