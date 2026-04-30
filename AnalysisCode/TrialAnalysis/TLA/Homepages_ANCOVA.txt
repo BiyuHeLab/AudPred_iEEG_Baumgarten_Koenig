@@ -1,6 +1,0 @@
-
-https://www.statisticssolutions.com/one-way-ancova/
-https://mailman.science.ru.nl/pipermail/fieldtrip/2016-May/036406.html
-
-http://www.fieldtriptoolbox.org/workshop/madrid2019/tutorial_stats/
-http://www.fieldtriptoolbox.org/faq/how_can_i_test_an_interaction_effect_using_cluster-based_permutation_tests/
