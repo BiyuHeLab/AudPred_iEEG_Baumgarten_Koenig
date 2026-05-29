@@ -15,7 +15,8 @@ a) Preprocessing:
 b) Analysis_and_Plotting
     • \Behavior\contains scripts to analyze behavioral responses
     • \Connectivity\: Granger causality scripts; 
-      ◦ Base script: NASTD_ECoG_Connectivity_Main_lk.m
+      ◦ Base script: NASTD_EcoG_Connectivity_Main_lk.m
+◦ Script: NASTD_EcoG_Connectivity_PlotGC_statp1top31_acrossTDs+seqs.m for plotting GC across tone sequences (Figure 6B)
     • \DataPrep\: Scripts for data preparation prior to specific analysis (e.g., filtering, NaN-removal)
     • \HistoryTracking\: Sensory history tracking (SHI) analysis
       ◦ Base script: NASTD_ECoG_HisTrack_Main_lk.m
